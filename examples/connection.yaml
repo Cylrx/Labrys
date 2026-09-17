@@ -1,0 +1,21 @@
+kubernetes:
+  context: fictional
+  kubeconfig: |
+    apiVersion: v1
+    kind: Config
+    current-context: fictional
+    clusters:
+      - name: fictional
+        cluster:
+          server: https://api.example.invalid
+    users:
+      - name: fictional
+        user:
+          token: FICTIONAL_NOT_A_CREDENTIAL
+    contexts:
+      - name: fictional
+        context:
+          cluster: fictional
+          user: fictional
+transport:
+  mode: direct

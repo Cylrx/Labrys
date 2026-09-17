@@ -1,0 +1,7 @@
+schema_version: 1
+data_key_ref: op://VAULT_ID/KEY_ITEM_ID/password
+session:
+  max_age_seconds: 604800
+clusters:
+  - id: research-example
+    config_ref: op://VAULT_ID/CLUSTER_ITEM_ID/notesPlain

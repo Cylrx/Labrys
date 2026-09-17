@@ -1,0 +1,7 @@
+kubernetes:
+  context: YOUR_KUBECONFIG_CONTEXT
+  kubeconfig: |
+    PASTE_THE_COMPLETE_KUBECONFIG_HERE
+transport:
+  mode: ssh
+  ssh_target: YOUR_EXISTING_SSH_TARGET

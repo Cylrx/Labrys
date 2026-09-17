@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling==1.32.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lab-tools"
+version = "1.0.0"
+description = "Explicit, session-owned access to Kubernetes Notebooks"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "aiohttp>=3.12,<4",
+  "cryptography>=46,<48",
+  "onepassword-sdk>=0.4.1,<0.5",
+  "platformdirs>=4,<5",
+  "prompt-toolkit>=3.0.52,<4",
+  "pydantic>=2.12,<3",
+  "PyYAML>=6.0.3,<7",
+  "rich>=14.1,<15",
+]
+
+[project.scripts]
+lab = "lab.cli:main"
+lab-credential = "lab.credential:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12", "mypy>=1.17", "types-PyYAML>=6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lab"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/lab", "tests", "scripts", "docs", "examples", "profiles/template.yaml", ".agents/skills/lab-profile", "README.md", "pyproject.toml", "uv.lock"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = "onepassword.*"
+ignore_missing_imports = true
+
+[tool.uv]
+build-constraint-dependencies = [
+  "hatchling==1.32.0", "packaging==26.3", "pathspec==1.1.1",
+  "pluggy==1.6.0", "tomlkit==0.15.1", "trove-classifiers==2026.6.1.19",
+]

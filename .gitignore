@@ -1,0 +1,41 @@
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Build output
+/build/
+/dist/
+
+# Test, analysis and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+/htmlcov/
+
+# Local environment and imported credentials
+.env
+.env.*
+!.env.example
+/.kube/
+/kubeconfig
+/kubeconfig.*
+/*.kubeconfig
+
+# Private cluster profiles; keep the public template
+/profiles/*
+!/profiles/template.yaml
+
+# Logs and editor / macOS leftovers
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+
+# Misc
+AGENTS.md

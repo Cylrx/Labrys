@@ -1,0 +1,44 @@
+owner_label_key: owner
+namespace_rules:
+  research:
+    placement:
+      cpu_required_selector:
+        example.invalid/pool: cpu
+      gpu_required_selector:
+        example.invalid/pool: gpu
+    resources:
+      requests_equal_limits: true
+      per_gpu:
+        cpu: '8'
+        memory: 64Gi
+    gpu_types:
+    - value: Example-GPU
+      resource_name: nvidia.com/gpu
+      selector:
+        example.invalid/gpu-model: Example-GPU
+    gpu_defaults:
+      resource_name: nvidia.com/gpu
+      type_label: example.invalid/gpu-model
+    storage:
+      kind: hostPath
+      allowed_source_roots:
+      - /shared/projects
+      require_same_mount_path: false
+      mount_read_only: false
+      supplemental_mounts: []
+    runtime:
+      default:
+        mode: image_default
+      exact_images:
+        registry.example.invalid/team/python:example:
+          mode: command_override
+          command:
+          - sleep
+          - infinity
+          args: []
+    registry_rules:
+    - registry: registry.example.invalid
+      repository_prefix: team
+      pull_secret_names:
+      - team-registry-reader
+    unmatched_registry: anonymous
