@@ -1,4 +1,6 @@
-# lab
+<img src="assets/labrys.svg" width="72" height="72" alt="Labrys double axe">
+
+# Labrys
 
 A personal terminal tool I made for the Kubeflow notebooks I use at work.
 
@@ -7,7 +9,9 @@ when I'm done. It also connects to my 1Password and automatically handles
 credentials. Basically, it keeps everything in one place so I don't have to
 juggle kubeconfigs and SSH connections all the time.
 
-If your setup looks similar, it might be useful. 
+If your setup looks similar, it might be useful.
+
+Run it with `lab`, or `labrys` if you prefer the full name. They are the same command.
 
 ## Trying it
 

@@ -3,9 +3,9 @@ requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "lab-tools"
+name = "labrys"
 version = "1.0.0"
-description = "Explicit, session-owned access to Kubernetes Notebooks"
+description = "A personal terminal tool for Kubeflow notebooks"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 lab = "lab.cli:main"
+labrys = "lab.cli:main"
 lab-credential = "lab.credential:main"
 
 [dependency-groups]
@@ -30,7 +31,7 @@ dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12", "mypy>=1.17", "typ
 packages = ["src/lab"]
 
 [tool.hatch.build.targets.sdist]
-only-include = ["src/lab", "tests", "scripts", "docs", "examples", "profiles/template.yaml", ".agents/skills/lab-profile", "README.md", "pyproject.toml", "uv.lock"]
+only-include = ["src/lab", "tests", "docs", "assets", "examples", "profiles/template.yaml", ".agents/skills/lab-profile", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

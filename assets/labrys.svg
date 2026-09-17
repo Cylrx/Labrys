@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title">
+  <title id="title">Labrys double axe</title>
+  <path d="M48 22v60" fill="none" stroke="#737373" stroke-width="6" stroke-linecap="round"/>
+  <path d="M45 30C34 29 26 22 20 14C11 27 11 46 20 59C26 51 34 44 45 43Z
+           M51 30C62 29 70 22 76 14C85 27 85 46 76 59C70 51 62 44 51 43Z"
+        fill="#737373"/>
+</svg>

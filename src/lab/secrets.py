@@ -92,7 +92,7 @@ class Secrets:
         try:
             async with asyncio.timeout(30):
                 client = await Client.authenticate(
-                    auth=token, integration_name="lab", integration_version=__version__
+                    auth=token, integration_name="Labrys", integration_version=__version__
                 )
             return cls(client)
         except Exception as error:
