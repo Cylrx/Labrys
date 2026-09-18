@@ -13,6 +13,12 @@ If your setup looks similar, it might be useful.
 
 Run it with `lab`, or `labrys` if you prefer the full name. They are the same command.
 
+<div align="center">
+  <img src="assets/demo.gif" alt="A demo video" width="1008" />
+</div>
+
+
+
 ## Trying it
 
 You'll need [uv](https://docs.astral.sh/uv/) and a read-only 1Password Service
