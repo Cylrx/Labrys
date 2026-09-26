@@ -89,6 +89,51 @@ Loading a preset fills the form; editing the form does not change the saved
 preset. The menu's `save-preset` action can also save a completed creation by
 operation ID.
 
+# AI agents and automation
+
+Use standalone `lab notebook` commands with explicit arguments rather than driving
+the interactive menu. Add `--json` for machine-readable results and `--request-auth`
+when a person will supply the Service Account Token. For example, an agent can
+request a Notebook listing without asking the user to disclose a token in chat:
+
+```sh
+lab notebook list --cluster research-example --namespace research \
+  --json --request-auth
+```
+
+1. Start the command and keep that process running. It prints an authorization
+   command to stderr and waits up to five minutes. The authorization command uses
+   the installed Python interpreter to invoke `lab auth --request PATH`.
+2. Show the printed command to the user unchanged. The user runs it in their own
+   terminal, reviews the requested operation and enters the token in a hidden
+   prompt. The token goes directly to the waiting lab process through a local
+   socket; it is not part of the printed command or the request file.
+3. Wait for the original process to finish, then read its exit code and JSON
+   output. Successful token delivery means only that lab received the token;
+   the original process reports whether authorization and the operation succeeded.
+
+Keep the process alive through the user's response; a short command-runner timeout
+can cancel the request. Poll the existing process instead of launching another
+copy. Each standalone invocation needs its own authorization. An expired request
+requires a new invocation and its newly printed authorization command.
+
+For start, stop, delete or retry, use `--yes` only for the operation the user has
+authorized. Token handoff does not bypass the operation's confirmation prompt.
+Standalone `create` submits after authorization without a second confirmation.
+After an interrupted creation, retain its `operation_id` and inspect that operation
+before retrying; a lost response does not establish that creation failed.
+
+`init` and `cluster` require interactive setup. `shell` and `open` need a controlling
+terminal and do not support JSON output. `--token-stdin` is an alternative for a
+trusted process that already supplies the token through a pipe; do not put tokens
+in command arguments, environment variables, chat or tool output.
+
+`lab-credential` is the internal Kubernetes credential helper invoked by kubectl
+and editor clients. It uses an existing session grant to return a Kubernetes
+credential to that client. It does not prompt for a 1Password token or authorize
+an agent's command. Agents request authorization with `--request-auth`; the user
+provides it through `lab auth`.
+
 # Commands
 
 ## init
@@ -272,18 +317,6 @@ lab notebook status --cluster research-example \
 lab notebook retry --cluster research-example \
   --operation-id OPERATION_UUID
 ```
-
-Request JSON output and provide the token privately from a separate terminal:
-
-```sh
-lab notebook list --cluster research-example --namespace research \
-  --json --request-auth
-```
-
-Run the printed authorization command in your own terminal. Tokens should never
-appear in command arguments, shell history or chat. For `--token-stdin`, supply
-the input through a trusted process or pipe without embedding the token in the
-shell command.
 
 # Output and exit status
 

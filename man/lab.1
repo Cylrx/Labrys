@@ -97,6 +97,69 @@ Loading a preset fills the form; editing the form does not change the
 saved preset.
 The menu\(cqs \f[CR]save\-preset\f[R] action can also save a completed
 creation by operation ID.
+.SH AI agents and automation
+Use standalone \f[CR]lab notebook\f[R] commands with explicit arguments
+rather than driving the interactive menu.
+Add \f[CR]\-\-json\f[R] for machine\-readable results and
+\f[CR]\-\-request\-auth\f[R] when a person will supply the Service
+Account Token.
+For example, an agent can request a Notebook listing without asking the
+user to disclose a token in chat:
+.IP
+.EX
+lab notebook list \-\-cluster research\-example \-\-namespace research \(rs
+  \-\-json \-\-request\-auth
+.EE
+.IP "1." 3
+Start the command and keep that process running.
+It prints an authorization command to stderr and waits up to five
+minutes.
+The authorization command uses the installed Python interpreter to
+invoke \f[CR]lab auth \-\-request PATH\f[R].
+.IP "2." 3
+Show the printed command to the user unchanged.
+The user runs it in their own terminal, reviews the requested operation
+and enters the token in a hidden prompt.
+The token goes directly to the waiting lab process through a local
+socket; it is not part of the printed command or the request file.
+.IP "3." 3
+Wait for the original process to finish, then read its exit code and
+JSON output.
+Successful token delivery means only that lab received the token; the
+original process reports whether authorization and the operation
+succeeded.
+.PP
+Keep the process alive through the user\(cqs response; a short
+command\-runner timeout can cancel the request.
+Poll the existing process instead of launching another copy.
+Each standalone invocation needs its own authorization.
+An expired request requires a new invocation and its newly printed
+authorization command.
+.PP
+For start, stop, delete or retry, use \f[CR]\-\-yes\f[R] only for the
+operation the user has authorized.
+Token handoff does not bypass the operation\(cqs confirmation prompt.
+Standalone \f[CR]create\f[R] submits after authorization without a
+second confirmation.
+After an interrupted creation, retain its \f[CR]operation_id\f[R] and
+inspect that operation before retrying; a lost response does not
+establish that creation failed.
+.PP
+\f[CR]init\f[R] and \f[CR]cluster\f[R] require interactive setup.
+\f[CR]shell\f[R] and \f[CR]open\f[R] need a controlling terminal and do
+not support JSON output.
+\f[CR]\-\-token\-stdin\f[R] is an alternative for a trusted process that
+already supplies the token through a pipe; do not put tokens in command
+arguments, environment variables, chat or tool output.
+.PP
+\f[CR]lab\-credential\f[R] is the internal Kubernetes credential helper
+invoked by kubectl and editor clients.
+It uses an existing session grant to return a Kubernetes credential to
+that client.
+It does not prompt for a 1Password token or authorize an agent\(cqs
+command.
+Agents request authorization with \f[CR]\-\-request\-auth\f[R]; the user
+provides it through \f[CR]lab auth\f[R].
 .SH Commands
 .SS init
 Configure this device as described under Setup.
@@ -440,19 +503,6 @@ lab notebook status \-\-cluster research\-example \(rs
 lab notebook retry \-\-cluster research\-example \(rs
   \-\-operation\-id OPERATION_UUID
 .EE
-.PP
-Request JSON output and provide the token privately from a separate
-terminal:
-.IP
-.EX
-lab notebook list \-\-cluster research\-example \-\-namespace research \(rs
-  \-\-json \-\-request\-auth
-.EE
-.PP
-Run the printed authorization command in your own terminal.
-Tokens should never appear in command arguments, shell history or chat.
-For \f[CR]\-\-token\-stdin\f[R], supply the input through a trusted
-process or pipe without embedding the token in the shell command.
 .SH Output and exit status
 Human\-readable output uses tables and status messages.
 With \f[CR]\-\-json\f[R], stdout contains one object with

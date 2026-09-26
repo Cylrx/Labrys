@@ -60,6 +60,9 @@ ACTIONS = {
 
 
 class Parser(argparse.ArgumentParser):
+    def format_help(self):
+        return super().format_help() + "\nFor more information, run 'man lab'.\n"
+
     def error(self, message):
         raise LabError("Invalid command or option. Run lab --help for the command syntax.", 2)
 
@@ -113,8 +116,7 @@ def parser() -> Parser:
     root = Parser(
         prog="lab",
         description="Manage Kubeflow notebooks. Run without a subcommand for the interactive menu.",
-        epilog="Exiting lab disconnects local clients and leaves Notebooks running. "
-        "See man lab for setup, examples and the command reference.",
+        epilog="Exiting lab disconnects local clients and leaves Notebooks running.",
         parents=[common],
     )
     root.add_argument("--version", action="version", version=__version__)
@@ -167,7 +169,7 @@ def parser() -> Parser:
             )
             sub.epilog = (
                 "Submits without confirmation. A readiness timeout leaves the Notebook on "
-                "the cluster. See man lab for required fields and examples."
+                "the cluster."
             )
         if action in {"shell", "open", "editor-restart"}:
             sub.add_argument("--pod", help="Select a Ready Pod owned by this Notebook")
