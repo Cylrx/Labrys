@@ -80,6 +80,7 @@ class Relay:
             await asyncio.wait_for(writer.drain(), 5)
 
     async def disconnect(self) -> None:
+        self.destination = None
         for writer in tuple(self._writers):
             writer.transport.abort()
         current = asyncio.current_task()
@@ -87,14 +88,14 @@ class Relay:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        self.destination = None
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
+        await self.disconnect()
+        if self._server is not None:
             await self._server.wait_closed()
             self._server = None
-        await self.disconnect()
 
 
 class SSHForward:

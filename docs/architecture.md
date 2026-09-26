@@ -1,9 +1,13 @@
 # Architecture
 
-A remote Notebook and a local lab session have independent lifetimes. Kubernetes
-keeps the Notebook until someone stops or deletes it. A `Session` authorizes
-local access to one cluster until disconnection or expiry. This is why exiting
-lab disconnects its shell and editor clients without stopping their Notebook.
+Lab separates authorization from connections. `access.Authorization` holds a
+1Password client that can resolve the registered clusters its credentials permit.
+Each `Session` owns a connection to one cluster. Remote Notebooks have their own
+lifetime in Kubernetes, independent of these local objects.
+
+Closing local authorization disconnects its clients without requesting Notebook
+shutdown or deletion. Processes attached to an exec terminal can still be affected
+by the terminal disconnecting.
 
 ## Local access
 
@@ -22,6 +26,26 @@ For `--request-auth`, `auth` creates an expiring request and accepts one token
 from a separate terminal. The request file describes the operation; the token
 travels through the private socket. This allows a person to authorize a command
 without putting a token in its arguments or environment.
+
+## Reusable CLI authorization
+
+`lab session start` publishes a Unix socket in a private temporary directory and
+stays in the foreground. The directory and socket are user-owned; both peers
+check the Unix user identity. Session IDs are locators, not bearer credentials.
+No token is stored in the directory. The local user account and code are trusted.
+
+Each socket handler owns one request. Metadata requests read the index or selected
+connection and profile. A kubectl request creates an ordinary `Session` and client
+grant, then keeps the socket open until its client exits. The caller runs kubectl
+locally with inherited standard streams, so terminals and pipes need no custom
+streaming protocol. Separate clients get separate cluster connections.
+
+The owner preserves the initial absolute authorization deadline across every
+connection. It also expires after 15 minutes without active requests or clients;
+the idle interval starts after the last client's cleanup finishes. Shutdown stops
+new requests, drains connection cleanup, then acknowledges closure and removes
+the socket. A cleanup failure ends authorization with an error. These access paths
+do not load Notebook history or its encryption key.
 
 ## Configuration and creation
 

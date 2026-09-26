@@ -16,6 +16,11 @@ lab - manage Kubeflow notebooks from a terminal
 lab [--cluster CLUSTER]
 lab init
 lab cluster add|remove [--cluster-id CLUSTER]
+lab session start [--request-auth | --token-stdin] [--json]
+lab session close SESSION [--json]
+lab cluster list --session SESSION [--json]
+lab cluster inspect CLUSTER --session SESSION [--json]
+lab kubectl --session SESSION --cluster CLUSTER -- COMMAND [ARGS...]
 lab notebook COMMAND --cluster CLUSTER [OPTIONS]
 lab auth --request PATH
 lab --help
@@ -30,10 +35,14 @@ Labrys connects to a Kubernetes cluster using credentials stored in 1Password.
 It can create a Kubeflow Notebook, open a container shell or VS Code window,
 and start, stop or delete the Notebook.
 
-Each invocation owns one authorized connection to one cluster. Keep lab running
-while using its shell or editor connection. Exiting lab disconnects local clients
-but leaves remote Notebooks running. Use `stop` when you want to release a
-Notebook's compute resources.
+Interactive lab and standalone Notebook commands each own one cluster connection.
+For repeated CLI access, `lab session start` holds authorization while other
+commands discover clusters and run kubectl. Each kubectl client gets its own
+connection to one selected cluster.
+
+Keep the owning lab process running while using its connections. Closing local
+access does not stop or delete remote Notebooks. Use `stop` when you want to
+release a Notebook's compute resources.
 
 Run `lab` without a subcommand to use the interactive menu. Run
 `lab notebook COMMAND` to perform one operation with explicit arguments.
@@ -91,50 +100,144 @@ operation ID.
 
 # AI agents and automation
 
-Use standalone `lab notebook` commands with explicit arguments rather than driving
-the interactive menu. Add `--json` for machine-readable results and `--request-auth`
-when a person will supply the Service Account Token. For example, an agent can
-request a Notebook listing without asking the user to disclose a token in chat:
+Use a Notebook prepared by the user by default. Create, start, stop or delete a
+Notebook only when the user explicitly asks. Native kubectl keeps the cluster's
+existing permissions; lab does not restrict its verbs or apply Notebook creation
+profiles to raw Kubernetes requests.
+
+Start one authorization process and keep it running:
 
 ```sh
-lab notebook list --cluster research-example --namespace research \
-  --json --request-auth
+lab session start --request-auth --json
 ```
 
-1. Start the command and keep that process running. It prints an authorization
-   command to stderr and waits up to five minutes. The authorization command uses
-   the installed Python interpreter to invoke `lab auth --request PATH`.
-2. Show the printed command to the user unchanged. The user runs it in their own
-   terminal, reviews the requested operation and enters the token in a hidden
-   prompt. The token goes directly to the waiting lab process through a local
-   socket; it is not part of the printed command or the request file.
-3. Wait for the original process to finish, then read its exit code and JSON
-   output. Successful token delivery means only that lab received the token;
-   the original process reports whether authorization and the operation succeeded.
+lab prints an authorization command to stderr and waits up to five minutes. Show
+that command to the user unchanged. They run it in their own terminal, review the
+scope and enter their Service Account Token in a hidden prompt. The token goes
+directly to lab through a private socket; do not request it in chat or tool output.
 
-Keep the process alive through the user's response; a short command-runner timeout
-can cancel the request. Poll the existing process instead of launching another
-copy. Each standalone invocation needs its own authorization. An expired request
-requires a new invocation and its newly printed authorization command.
+After successful authorization, stdout contains a `Ready` JSON result with
+`data.session`, `data.expires_in` and `data.idle_timeout`. Keep the process alive;
+a command runner's short timeout would end the authorization. The session ID
+identifies a local, same-user socket, not a token. In the following examples,
+replace `lab-session-example` with the returned ID.
 
-For start, stop, delete or retry, use `--yes` only for the operation the user has
-authorized. Token handoff does not bypass the operation's confirmation prompt.
-Standalone `create` submits after authorization without a second confirmation.
-After an interrupted creation, retain its `operation_id` and inspect that operation
-before retrying; a lost response does not establish that creation failed.
+Discover registered clusters before selecting one:
 
-`init` and `cluster` require interactive setup. `shell` and `open` need a controlling
-terminal and do not support JSON output. `--token-stdin` is an alternative for a
-trusted process that already supplies the token through a pipe; do not put tokens
-in command arguments, environment variables, chat or tool output.
+```sh
+lab cluster list --session lab-session-example --json
+lab cluster inspect research-example --session lab-session-example --json
+```
 
-`lab-credential` is the internal Kubernetes credential helper invoked by kubectl
-and editor clients. It uses an existing session grant to return a Kubernetes
-credential to that client. It does not prompt for a 1Password token or authorize
-an agent's command. Agents request authorization with `--request-auth`; the user
-provides it through `lab auth`.
+Listing reads the 1Password connection index. Inspection returns connection
+metadata and local creation rules, without credentials. A missing profile is
+reported but does not prevent kubectl access. Profile namespaces describe creation
+rules, not the full set of namespaces the Kubernetes credential can access.
+
+Use native kubectl to find the user's Notebook and its Pod:
+
+```sh
+lab kubectl --session lab-session-example --cluster research-example -- \
+  get notebooks.kubeflow.org -n research -o json
+lab kubectl --session lab-session-example --cluster research-example -- \
+  get pods -n research -l notebook-name=example-notebook -o json
+```
+
+Use names from the results to choose the target. The examples are fictional.
+For a persistent shell, start an interactive command in a terminal-capable runner:
+
+```sh
+lab kubectl --session lab-session-example --cluster research-example -- \
+  exec -it example-notebook-0 -n research -c main -- /bin/sh
+```
+
+Keep that command running and send later input to the same terminal. Its working
+directory and shell variables persist. Open another client for concurrent work.
+The same authorization can serve other indexed clusters; each client establishes
+its own connection. Standard input, stdout, stderr and kubectl's exit code pass
+through unchanged, so pipes and native `-o json` work normally.
+
+Before reporting completion, explicitly close your local access:
+
+```sh
+lab session close lab-session-example --json
+```
+
+Closing authorization disconnects its clients and removes their temporary
+credentials and routes. It does not revoke the Service Account Token itself,
+stop or delete Notebooks, or send remote process-termination commands. A later
+visit starts with a new authorization.
+
+**Tip:** If an experiment should keep running after you disconnect, consider
+using a tool such as `tmux` inside the container so you can detach and reconnect
+later. Closing an ordinary exec terminal may interrupt its foreground work.
+
+Authorization also ends at the index's absolute lifetime limit, including laptop
+sleep, or after 15 minutes with no running request or client. A live shell,
+log follower or port-forward counts as active even when silent. This idle rule
+does not try to distinguish an unused prompt from a quiet experiment.
+
+The existing `lab notebook` commands remain available for explicit Notebook
+workflows. They require their own authorization and do not accept `--session`.
+Use `--json --request-auth` for a standalone machine-readable operation. Each
+request authorizes only that invocation; use `--yes` for a requested mutation
+that would otherwise ask for confirmation. Creation submits without a second
+confirmation. Preserve its `operation_id` after an interrupted response and
+inspect the original operation before retrying.
+
+`lab-credential` is the internal Kubernetes helper used by kubectl and editor
+clients. It uses an existing connection grant; it does not prompt for the
+1Password token. The user supplies that token through `lab auth`. Reusable
+sessions are local to the same user account and assume trusted installed code
+and local clients.
 
 # Commands
+
+## session start
+
+Authorize reusable local access and stay in the foreground until closed or
+expired. The default is a hidden token prompt; `--request-auth` accepts a private
+handoff from another terminal, and `--token-stdin` accepts a trusted input pipe.
+The session reads the connection index without requiring a cluster ID, private
+creation profile or local-history encryption key. No token is saved on disk.
+
+## session close SESSION
+
+End the selected authorization and wait for its cluster connections to be cleaned
+up. `Closed` confirms that lab's access routes and credential grants are cleaned
+up; local kubectl processes may finish exiting shortly afterward. Cleanup failures
+are reported as errors rather than successful closure. Remote Notebooks are left
+on the cluster.
+
+## cluster list
+
+With `--session SESSION`, read the current index and return `clusters`, a list of
+objects containing registered `id` values. This does not connect to Kubernetes.
+
+## cluster inspect CLUSTER
+
+With `--session SESSION`, read the registered connection and return `id`,
+`context`, `server`, `transport` and `profile`. The profile contains the local
+creation rules. If it is unavailable, `profile` is null and `profile_error`
+explains why. Kubernetes credentials and 1Password item bodies are not returned.
+
+## kubectl -- COMMAND [ARGS...]
+
+With `--session SESSION --cluster CLUSTER`, run the installed kubectl through a
+fresh connection using the existing authorization. The first `--` separates lab
+options from kubectl arguments. A later `--`, for example in `kubectl exec`, is
+passed through to kubectl normally.
+
+kubectl inherits the caller's environment, including cloud authentication and
+proxy settings. lab supplies `KUBECONFIG` and its client grant, and passes all
+arguments unchanged. The Service Account Token received by lab is not added to
+the client environment. Explicit native connection options follow kubectl's
+normal behavior. A connection using lab's credential grant must match that grant's
+cluster identity. If you explicitly select other credentials, their access is
+outside the lab authorization; closing lab does not revoke them.
+
+lab does not interpret or wrap kubectl's output. A failed connection can be
+retried with a new invocation while the authorization remains valid.
 
 ## init
 
@@ -178,7 +281,8 @@ on the cluster; inspect its status before retrying.
 
 ## notebook status [NAME]
 
-Show a Notebook's configured resources, requested lifecycle and observed Pods.
+Show a Notebook's UID, requested stop state, observed lifecycle and Pod names
+and states. Use native kubectl to read its full spec, including configured resources.
 Use `--operation-id` instead of name and namespace to inspect a recorded creation.
 Resource values describe requests, not measured usage.
 
@@ -246,6 +350,7 @@ Inside a session, forms can ask for missing values.
 | `--request-auth` | Wait up to five minutes for a private token handoff from `lab auth`. Mutually exclusive with `--token-stdin`. |
 | `--json` | Write one JSON result to stdout. Available for standalone Notebook commands except `shell` and `open`. |
 | `--yes`, `-y` | Skip confirmation for start, stop, delete, retry or supported editor restart. Does not bypass validation or authorize later menu actions. |
+| `--session SESSION` | Existing local authorization for `cluster list`, `cluster inspect` and `kubectl`. |
 | `--cluster-id CLUSTER` | Profile or registration to select for `cluster add` or `cluster remove`. |
 | `--operation-id UUID` | Creation receipt to inspect with `status` or reconcile with `retry`. Required for `retry`. |
 | `--pod POD` | Select a Ready owned Pod for shell, open or editor restart. |
@@ -255,8 +360,8 @@ Inside a session, forms can ask for missing values.
 | `--help`, `-h` | Show help for the selected command and exit. |
 | `--version` | Print the installed version and exit. |
 
-`init` and `cluster` are interactive setup commands. They do not accept the
-Notebook authorization, JSON or confirmation options.
+`init`, `cluster add` and `cluster remove` are interactive setup commands.
+`cluster list` and `cluster inspect` use an existing session and accept `--json`.
 
 ## Creation options
 
@@ -320,8 +425,11 @@ lab notebook retry --cluster research-example \
 
 # Output and exit status
 
-Human-readable output uses tables and status messages. With `--json`, stdout
-contains one object with `schema_version: 1`. Previews and diagnostics use stderr.
+Lab command results use `schema_version: 1` with `--json`. Previews and diagnostics
+use stderr. `session start` prints its readiness result, then remains running;
+normal closure is reported on stderr. Cluster discovery uses JSON for machine
+output and formatted JSON for human output. The `kubectl` command passes native
+output and exit codes through without a lab JSON envelope.
 Successful results contain `operation`, `status`, `target` and `data`. Errors
 contain `status: "error"`, `error`, `code`, `target` and `data`.
 
@@ -354,7 +462,9 @@ absolute directory recorded by setup.
 The bootstrap contains references and the profiles directory. Credentials remain
 in 1Password; the Service Account Token is held by the authorized process and is
 not saved. Each session has an absolute lifetime, including time spent asleep,
-configured by `session.max_age_seconds` in the index. There is no idle timeout.
+configured by `session.max_age_seconds` in the index. Reusable CLI authorization
+also has a 15-minute idle timeout when no request or client is active. Interactive
+Notebook sessions retain their absolute lifetime without this idle timer.
 
 Shell and editor clients receive a temporary credential capability tied to the
 live lab process. They are trusted local clients. Disconnecting blocks lab's

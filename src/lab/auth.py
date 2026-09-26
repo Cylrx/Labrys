@@ -73,6 +73,8 @@ def _decode(raw):
 
 def description(args):
     """Describe parsed options without a token or an executable command payload."""
+    if args.command == "session" and args.action == "start":
+        return {"command": "session", "action": "start"}
     return {
         key: value
         for key, value in vars(args).items()
@@ -97,6 +99,8 @@ def _validate_manifest(value):
     if not 0 < expiry - time.time() <= LIFETIME + 2:
         raise _error()
     action = value["action"]
+    if action == {"command": "session", "action": "start"}:
+        return value
     if not isinstance(action, dict) or action.get("command") != "notebook":
         raise _error()
     allowed: dict[str, type | tuple[type, ...]] = {
@@ -351,9 +355,19 @@ def hidden_token(deadline: float) -> str:
 
 def show_request(action: dict) -> None:
     """Render only the intended operation and material options as escaped plain text."""
-    print("Authorize independent lab access", file=sys.stderr)
+    reusable = action.get("command") == "session"
+    print(
+        "Authorize reusable lab access" if reusable else "Authorize independent lab access",
+        file=sys.stderr,
+    )
+    if reusable:
+        print(
+            "  Scope: discover indexed clusters and run kubectl with their existing permissions.\n"
+            "  Authorization remains available until explicit close or the session timeout.",
+            file=sys.stderr,
+        )
     labels = {
-        "action": "Notebook action",
+        "action": "Session action" if reusable else "Notebook action",
         "cluster": "Cluster",
         "namespace": "Namespace",
         "name": "Notebook",

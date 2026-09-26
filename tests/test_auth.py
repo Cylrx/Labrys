@@ -17,7 +17,7 @@ ACTION = {"command": "notebook", "action": "list", "cluster": "fixture", "namesp
 SECRET = "synthetic-auth-marker-never-a-credential"
 
 
-async def pending(monkeypatch, tmp_path, *, lifetime=3):
+async def pending(monkeypatch, tmp_path, *, lifetime=3, action=None):
     paths = []
     original = auth.tempfile.TemporaryDirectory
 
@@ -27,7 +27,7 @@ async def pending(monkeypatch, tmp_path, *, lifetime=3):
         return result
 
     monkeypatch.setattr(auth.tempfile, "TemporaryDirectory", temporary)
-    task = asyncio.create_task(auth.request_token(ACTION, lifetime=lifetime))
+    task = asyncio.create_task(auth.request_token(action or ACTION, lifetime=lifetime))
     for _ in range(100):
         if paths and paths[0].exists():
             return task, paths[0]
@@ -259,4 +259,20 @@ async def test_byte_identical_replacement_is_rejected_before_prompt(monkeypatch,
         await asyncio.to_thread(auth.send_token, str(path))
     with pytest.raises(LabError):
         await task
+    assert not path.parent.exists()
+
+
+async def test_reusable_session_handoff_displays_its_scope_without_exposing_token(
+    monkeypatch, tmp_path, capsys
+):
+    args = cli.parser().parse_args(["session", "start", "--request-auth", "--json"])
+    cli.validate_arguments(args)
+    task, path = await pending(monkeypatch, tmp_path, action=auth.description(args))
+    monkeypatch.setattr(auth, "hidden_token", lambda deadline: SECRET)
+    await asyncio.to_thread(auth.send_token, str(path))
+    assert await task == SECRET
+    output = capsys.readouterr()
+    assert "Authorize reusable lab access" in output.err
+    assert "indexed clusters" in output.err
+    assert SECRET not in output.out + output.err
     assert not path.parent.exists()

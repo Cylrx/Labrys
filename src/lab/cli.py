@@ -1,9 +1,10 @@
-"""English command interface; each invocation owns exactly one authorized session."""
+"""Interactive Notebook workflows and reusable command-line authorization."""
 
 import argparse
 import asyncio
 import json
 import math
+import signal
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -11,14 +12,14 @@ from pathlib import Path, PurePosixPath
 from prompt_toolkit.output import create_output
 from pydantic import TypeAdapter, ValidationError
 
-from lab import __version__, auth, clock, editor_recovery, presentation
+from lab import __version__, access, auth, clock, editor_recovery, presentation
 from lab.config import cluster_name, dns_name, namespace_name, parse_cluster, parse_index
 from lab.display import display_session
 from lab.editor import open_editor, open_shell
 from lab.errors import LabError
 from lab.guidance import SETUP
 from lab.history import Repository
-from lab.inputs import choose, controlling_terminal, terminal_required
+from lab.inputs import choose, controlling_terminal, read_stdin_line, terminal_required
 from lab.kubernetes import Kubernetes
 from lab.manifest import NotebookInput, compile_notebook, normalized_inputs
 from lab.notebooks import Notebooks
@@ -81,13 +82,8 @@ class Parser(argparse.ArgumentParser):
 
 
 def parser() -> Parser:
-    common = Parser(add_help=False)
-    common.add_argument(
-        "--cluster",
-        default=argparse.SUPPRESS,
-        help="Registered cluster ID; required for standalone Notebook commands",
-    )
-    authentication = common.add_mutually_exclusive_group()
+    authorization = Parser(add_help=False)
+    authentication = authorization.add_mutually_exclusive_group()
     authentication.add_argument(
         "--token-stdin",
         action="store_true",
@@ -100,11 +96,17 @@ def parser() -> Parser:
         default=argparse.SUPPRESS,
         help="Wait for one hidden token handoff from lab auth",
     )
-    common.add_argument(
+    authorization.add_argument(
         "--json",
         action="store_true",
         default=argparse.SUPPRESS,
         help="Write a JSON result; unavailable for menus, shell and open",
+    )
+    common = Parser(add_help=False, parents=[authorization])
+    common.add_argument(
+        "--cluster",
+        default=argparse.SUPPRESS,
+        help="Registered cluster ID; required for standalone Notebook commands",
     )
     common.add_argument(
         "--yes",
@@ -134,6 +136,38 @@ def parser() -> Parser:
     remove.add_argument(
         "--cluster-id", help="Registered cluster name; omit to select from the list"
     )
+    clients = Parser(add_help=False)
+    clients.add_argument("--session", required=True, help="ID printed by lab session start")
+    listing = cluster_actions.add_parser(
+        "list", help="List registered cluster IDs", parents=[clients]
+    )
+    listing.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Write a JSON result"
+    )
+    inspection = cluster_actions.add_parser(
+        "inspect", help="Read connection metadata and creation rules", parents=[clients]
+    )
+    inspection.add_argument("cluster_id", help="Registered cluster ID")
+    inspection.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Write a JSON result"
+    )
+    sessions = commands.add_parser("session", help="Manage reusable local authorization")
+    session_actions = sessions.add_subparsers(dest="action", required=True)
+    session_actions.add_parser(
+        "start", help="Authorize and keep this process running", parents=[authorization]
+    )
+    closing = session_actions.add_parser(
+        "close", help="Close local access without stopping Notebooks"
+    )
+    closing.add_argument("session", help="ID printed by lab session start")
+    closing.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Write a JSON result"
+    )
+    kubectl = commands.add_parser(
+        "kubectl", help="Run native kubectl using a live session", parents=[clients]
+    )
+    kubectl.add_argument("--cluster", default=argparse.SUPPRESS, help="Registered cluster ID")
+    kubectl.add_argument("arguments", nargs=argparse.REMAINDER, help="kubectl arguments after --")
     notebook = commands.add_parser("notebook", help="Manage Kubernetes Notebooks", parents=[common])
     actions = notebook.add_subparsers(dest="action", required=True)
     for action, description in ACTIONS.items():
@@ -184,12 +218,40 @@ def parser() -> Parser:
 
 
 def validate_arguments(args, *, interactive=False) -> None:
+    if args.token_stdin and args.request_auth:
+        raise LabError("--request-auth and --token-stdin are mutually exclusive.", 2)
+    if uses_access(args):
+        if interactive:
+            raise LabError("Run reusable access commands outside the Notebook menu.", 2)
+        starting = args.command == "session" and args.action == "start"
+        if args.yes or (not starting and (args.token_stdin or args.request_auth)):
+            raise LabError(
+                "Only session start accepts authentication options; --yes is not needed.", 2
+            )
+        if args.command != "kubectl" and args.cluster:
+            raise LabError("Use the registered cluster ID argument with cluster inspect.", 2)
+        if not starting:
+            access.socket_path(args.session)
+        identity = args.cluster if args.command == "kubectl" else getattr(args, "cluster_id", None)
+        if identity is not None:
+            try:
+                cluster_name(identity)
+            except (ValueError, TypeError):
+                raise LabError("Invalid registered cluster ID.", 2) from None
+        if args.command == "kubectl":
+            if not args.cluster or args.json:
+                raise LabError(
+                    "kubectl requires --cluster; use kubectl's -o json for JSON output.", 2
+                )
+            if args.arguments[:1] != ["--"]:
+                raise LabError("Separate kubectl arguments with --.", 2)
+            if len(args.arguments) == 1:
+                raise LabError("Supply a kubectl command after --.", 2)
+        return
     if args.command == "auth":
         if args.json or args.token_stdin or args.request_auth or args.cluster or args.yes:
             raise LabError("lab auth accepts only an explicit --request path.", 2)
         return
-    if args.token_stdin and args.request_auth:
-        raise LabError("--request-auth and --token-stdin are mutually exclusive.", 2)
     if interactive and args.request_auth:
         raise LabError("--request-auth is standalone only.", 2)
     if args.command in {"init", "cluster"} and (args.cluster or args.yes or interactive):
@@ -285,9 +347,7 @@ async def read_token(from_stdin: bool) -> str:
             cancel_label="Exit",
         )
         return values["token"]
-    raw = sys.stdin.buffer.readline(16386)
-    if len(raw) > 16385:
-        raise LabError("Service Account Token input exceeds 16 KiB.", 3)
+    raw = await read_stdin_line(16386)
     try:
         value = raw.removesuffix(b"\n").removesuffix(b"\r").decode("utf-8")
     except UnicodeError:
@@ -551,8 +611,59 @@ async def until_deadline(deadline: float, operation):
             await asyncio.gather(task, return_exceptions=True)
 
 
-async def run(args) -> dict | None:
+def uses_access(args) -> bool:
+    return args.command in {"session", "kubectl"} or (
+        args.command == "cluster" and args.action in {"list", "inspect"}
+    )
+
+
+async def run_access(args) -> dict | int | None:
+    """Keep reusable authorization separate from Notebook creation state."""
+    task = asyncio.current_task()
+    assert task is not None
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGTERM, task.cancel)
+    try:
+        if args.command == "session" and args.action == "start":
+            bootstrap = read_bootstrap(Paths())
+            if bootstrap is None:
+                raise LabError("Run 'lab init' to configure this device first.", 4)
+            token = (
+                await auth.request_token(auth.description(args))
+                if args.request_auth
+                else await read_token(args.token_stdin)
+            )
+            secrets = await Secrets.authenticate(token)
+            token = ""
+            authorized_at = clock.now()
+            index = parse_index(await secrets.read(bootstrap["index_ref"]))
+            owner = access.Authorization(secrets, bootstrap, index, authorized_at)
+
+            def ready(data):
+                result = emit("session.start", "Ready", data=data, machine=args.json)
+                if args.json:
+                    print(json.dumps(result), flush=True)
+
+            await owner.serve(ready)
+            presentation.note("Local authorization ended: " + owner.reason, stderr=True)
+            return None
+        if args.command == "kubectl":
+            return await access.kubectl(args.session, args.cluster, args.arguments[1:])
+        data = await access.request(args.session, args.action, getattr(args, "cluster_id", None))
+        result = emit(f"{args.command}.{args.action}", "ok", data=data, machine=True)
+        if not args.json:
+            presentation.console().print_json(data=data)
+        return result
+    except asyncio.CancelledError:
+        raise LabError("Local access interrupted.", 130) from None
+    finally:
+        loop.remove_signal_handler(signal.SIGTERM)
+
+
+async def run(args) -> dict | int | None:
     validate_arguments(args)
+    if uses_access(args):
+        return await run_access(args)
     native = args.command in {None, "init", "cluster"}
     if native:
         terminal_required()
@@ -703,15 +814,20 @@ async def run_authorized(
 
 
 def main() -> None:
-    machine = "--json" in sys.argv
+    arguments = sys.argv[1:]
+    options = arguments[: arguments.index("--")] if "--" in arguments else arguments
+    machine = "--json" in options
     try:
         protect_process()
         args = parser().parse_args()
         validate_arguments(args)
+        machine = args.json
         if args.command == "auth":
             auth.send_token(args.request)
             return
         result = asyncio.run(run(args))
+        if isinstance(result, int):
+            raise SystemExit(result)
         if machine and result is not None:
             print(json.dumps(result, ensure_ascii=True))
     except LabError as error:
