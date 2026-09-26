@@ -31,32 +31,32 @@ from lab.storage import Paths, read_bootstrap
 from lab.tools import Toolchain, protect_process
 from lab.ui import Field, Screens
 
-CREATION_FIELDS = (
-    "name",
-    "namespace",
-    "image",
-    "gpu_type",
-    "gpus",
-    "cpu",
-    "memory",
-    "node",
-    "storage_source",
-    "mount_path",
-    "workdir",
-    "owner",
-)
-ACTIONS = (
-    "list",
-    "create",
-    "status",
-    "shell",
-    "open",
-    "start",
-    "stop",
-    "delete",
-    "retry",
-    "editor-restart",
-)
+CREATION_FIELDS = {
+    "name": "Name of the new Notebook",
+    "namespace": "Explicit Kubernetes namespace",
+    "image": "Container image reference",
+    "gpu_type": "GPU type from the private profile's resource and selector rules",
+    "gpus": "Integer GPU count; use 0 for a CPU Notebook",
+    "cpu": "CPU cores or millicores, for example 2 or 2000m",
+    "memory": "Memory quantity, for example 4Gi or 4096Mi",
+    "node": "Optional node hostname selector",
+    "storage_source": "Existing absolute directory on the Kubernetes node",
+    "mount_path": "Absolute container path for the data mount",
+    "workdir": "Absolute container working directory; lab does not create it",
+    "owner": "Attribution label value, not a login account",
+}
+ACTIONS = {
+    "list": "List Notebooks and their observed state",
+    "create": "Preview and submit a new Notebook",
+    "status": "Inspect a Notebook or recorded creation",
+    "shell": "Open a shell in a Ready container",
+    "open": "Open VS Code and keep its connection authorized",
+    "start": "Request that a stopped Notebook start",
+    "stop": "Stop a Notebook while retaining its configuration",
+    "delete": "Delete the Notebook object",
+    "retry": "Reconcile and retry a recorded creation",
+    "editor-restart": "Stop the original VS Code Server; requires a qualified image/build",
+}
 
 
 class Parser(argparse.ArgumentParser):
@@ -80,23 +80,49 @@ class Parser(argparse.ArgumentParser):
 def parser() -> Parser:
     common = Parser(add_help=False)
     common.add_argument(
-        "--cluster", default=argparse.SUPPRESS, help="Cluster name from the root index"
+        "--cluster",
+        default=argparse.SUPPRESS,
+        help="Registered cluster ID; required for standalone Notebook commands",
     )
     authentication = common.add_mutually_exclusive_group()
-    authentication.add_argument("--token-stdin", action="store_true", default=argparse.SUPPRESS)
+    authentication.add_argument(
+        "--token-stdin",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Read one Service Account Token line from stdin (maximum 16 KiB)",
+    )
     authentication.add_argument(
         "--request-auth",
         action="store_true",
         default=argparse.SUPPRESS,
         help="Wait for one hidden token handoff from lab auth",
     )
-    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
-    common.add_argument("--yes", "-y", action="store_true", default=argparse.SUPPRESS)
-    root = Parser(prog="lab", description=__doc__, parents=[common])
+    common.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Write a JSON result; unavailable for menus, shell and open",
+    )
+    common.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Skip confirmation for this action; validation still applies",
+    )
+    root = Parser(
+        prog="lab",
+        description="Manage Kubeflow notebooks. Run without a subcommand for the interactive menu.",
+        epilog="Exiting lab disconnects local clients and leaves Notebooks running. "
+        "See man lab for setup, examples and the command reference.",
+        parents=[common],
+    )
     root.add_argument("--version", action="version", version=__version__)
     commands = root.add_subparsers(dest="command")
     sender = commands.add_parser("auth", help="Authorize an explicit waiting lab process")
-    sender.add_argument("--request", required=True)
+    sender.add_argument(
+        "--request", required=True, help="Request file printed by the waiting lab command"
+    )
     commands.add_parser("init", help="Set up the root reference with the 1Password GUI")
     cluster = commands.add_parser("cluster", help="Register cluster connections")
     cluster_actions = cluster.add_subparsers(dest="action", required=True)
@@ -108,25 +134,50 @@ def parser() -> Parser:
     )
     notebook = commands.add_parser("notebook", help="Manage Kubernetes Notebooks", parents=[common])
     actions = notebook.add_subparsers(dest="action", required=True)
-    for action in ACTIONS:
-        sub = actions.add_parser(action, parents=[common])
-        sub.add_argument("--namespace")
+    for action, description in ACTIONS.items():
+        sub = actions.add_parser(
+            action, help=description, description=description, parents=[common]
+        )
+        sub.add_argument("--namespace", help=CREATION_FIELDS["namespace"])
         if action not in {"list", "create", "retry"}:
-            sub.add_argument("name", nargs="?")
+            sub.add_argument("name", nargs="?", help="Notebook name")
         if action in {"status", "retry"}:
-            sub.add_argument("--operation-id")
+            sub.add_argument(
+                "--operation-id", help="Creation receipt UUID; replaces name and --namespace"
+            )
         if action == "create":
-            sub.add_argument("--name")
-            sub.add_argument("--preset")
-            for name in CREATION_FIELDS[2:]:
-                sub.add_argument("--" + name.replace("_", "-"), type=int if name == "gpus" else str)
-            sub.add_argument("--wait", action="store_true")
-            sub.add_argument("--timeout", type=float, default=300)
+            sub.add_argument(
+                "--preset", help="Saved preset name or ID in this cluster and namespace"
+            )
+            for name, help_text in CREATION_FIELDS.items():
+                if name != "namespace":
+                    sub.add_argument(
+                        "--" + name.replace("_", "-"),
+                        type=int if name == "gpus" else str,
+                        help=help_text,
+                    )
+            sub.add_argument(
+                "--wait", action="store_true", help="Wait for readiness after API acceptance"
+            )
+            sub.add_argument(
+                "--timeout",
+                type=float,
+                default=300,
+                help="Readiness wait in seconds with --wait (default: 300; range: >0 to 86400)",
+            )
+            sub.epilog = (
+                "Submits without confirmation. A readiness timeout leaves the Notebook on "
+                "the cluster. See man lab for required fields and examples."
+            )
         if action in {"shell", "open", "editor-restart"}:
-            sub.add_argument("--pod")
-            sub.add_argument("--container")
+            sub.add_argument("--pod", help="Select a Ready Pod owned by this Notebook")
+            sub.add_argument("--container", help="Select one container in the Pod")
         if action == "editor-restart":
-            sub.add_argument("--helper-python", default="/usr/bin/python3")
+            sub.add_argument(
+                "--helper-python",
+                default="/usr/bin/python3",
+                help="Absolute remote Python path (default: /usr/bin/python3)",
+            )
     return root
 
 

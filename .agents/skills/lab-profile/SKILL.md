@@ -9,7 +9,7 @@ Deliver a private `<profiles_dir>/<cluster-id>.yaml` file that lab can load, plu
 the exact registration command for a new cluster. This Skill is repository-local;
 it does not install itself globally or change application source.
 
-Read `profiles/template.yaml`, `docs/configuration.rst`, `src/lab/policy.py` and
+Read `profiles/template.yaml`, `docs/configuration.md`, `src/lab/policy.py` and
 `NamespaceRule` in `src/lab/config.py` from the repository root. The public template
 is fictional. Reuse its structure, never treat its values as team requirements.
 

@@ -30,8 +30,11 @@ dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.12", "mypy>=1.17", "typ
 [tool.hatch.build.targets.wheel]
 packages = ["src/lab"]
 
+[tool.hatch.build.targets.wheel.shared-data]
+"man" = "share/man/man1"
+
 [tool.hatch.build.targets.sdist]
-only-include = ["src/lab", "tests", "docs", "assets", "examples", "profiles/template.yaml", ".agents/skills/lab-profile", "README.md", "pyproject.toml", "uv.lock"]
+only-include = ["src/lab", "tests", "docs", "man", "assets", "examples", "profiles/template.yaml", ".agents/skills/lab-profile", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

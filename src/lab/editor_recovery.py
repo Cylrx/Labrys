@@ -66,7 +66,7 @@ class Profile:
         }
 
 
-# Entries require the disposable acceptance evidence described in docs/editor-recovery.rst.
+# Entries require image/build qualification as described in docs/architecture.md.
 QUALIFIED_PROFILES: tuple[Profile, ...] = ()
 
 
