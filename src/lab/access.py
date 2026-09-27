@@ -1,4 +1,4 @@
-"""Reusable local authorization with one connection per kubectl client."""
+"""Reusable local authorization for resource queries and native kubectl clients."""
 
 from __future__ import annotations
 
@@ -14,10 +14,12 @@ from pathlib import Path
 
 from lab import clock
 from lab.auth import peer_uid
-from lab.config import Index, cluster_name, parse_cluster, parse_index
+from lab.config import Index, cluster_name, namespace_name, parse_cluster, parse_index
 from lab.editor import stop_client
 from lab.errors import LabError
+from lab.kubernetes import Kubernetes
 from lab.policy import load_profile
+from lab.resources import load_resources
 from lab.secrets import Secrets
 from lab.session import Session, Tools
 from lab.tools import Toolchain
@@ -131,20 +133,32 @@ class Authorization:
             result["profile_error"] = str(error)
         return result
 
-    async def _kubectl(self, identity: str, reader, writer) -> None:
-        cluster = await self._cluster(identity)
-        tools = Toolchain.load()
-        executable = tools.require("kubectl")
+    @contextlib.asynccontextmanager
+    async def _connection(self, cluster, tools):
         connection = Session(
             cluster.connection,
             cluster.transport,
             self.max_age,
             Tools(tools.ssh, tools.python, tools.credential),
-            cluster_id=identity,
+            cluster_id=cluster.cluster_id,
             authorized_at=self.authorized_at,
         )
         try:
             await connection.connect()
+            yield connection
+        finally:
+            cleanup = asyncio.create_task(self._close_connection(connection))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+
+    async def _kubectl(self, identity: str, reader, writer) -> None:
+        cluster = await self._cluster(identity)
+        tools = Toolchain.load()
+        executable = tools.require("kubectl")
+        async with self._connection(cluster, tools) as connection:
             grant = await connection.create_grant()
             self._check()
             await _send(
@@ -158,13 +172,33 @@ class Authorization:
                 },
             )
             await reader.read(1)
-        finally:
-            cleanup = asyncio.create_task(self._close_connection(connection))
+
+    async def _resources(self, identity: str, namespaces: list[str], reader) -> dict:
+        cluster = await self._cluster(identity)
+        hints = list(namespaces)
+        with contextlib.suppress(LabError):
+            hints.extend(load_profile(self.profiles_dir, identity).namespace_rules)
+        if configured := cluster.kubernetes.namespace:
+            hints.append(configured)
+        async with self._connection(cluster, Toolchain.load()) as connection:
+            query = asyncio.create_task(load_resources(Kubernetes(connection), tuple(hints)))
+            disconnected = asyncio.create_task(reader.read(1))
             try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
-                raise
+                done, _ = await asyncio.wait(
+                    (query, disconnected), return_when=asyncio.FIRST_COMPLETED
+                )
+                if query not in done:
+                    raise LabError("Resource query client disconnected.", 130)
+                result = await query
+            finally:
+                for task in (query, disconnected):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(query, disconnected, return_exceptions=True)
+        if self.cleanup_error:
+            raise self.cleanup_error
+        self._check()
+        return result.report()
 
     async def _close_connection(self, connection: Session) -> None:
         try:
@@ -187,8 +221,18 @@ class Authorization:
             operation = request.get("operation")
             if operation in {"list", "close"}:
                 expected = {"operation"}
-            elif operation in {"inspect", "kubectl"}:
+            elif operation in {"inspect", "kubectl", "resources"}:
                 expected = {"operation", "cluster"}
+                if operation == "resources":
+                    expected.add("namespaces")
+                    namespaces = request.get("namespaces")
+                    if not isinstance(namespaces, list):
+                        raise LabError("Invalid namespace list.", 2)
+                    try:
+                        for namespace in namespaces:
+                            namespace_name(namespace)
+                    except (TypeError, ValueError):
+                        raise LabError("Invalid namespace list.", 2) from None
                 identity = request.get("cluster")
                 if not isinstance(identity, str):
                     raise LabError("Invalid cluster ID.", 2)
@@ -213,6 +257,8 @@ class Authorization:
                 data = {"clusters": [{"id": entry.id} for entry in index.clusters]}
             elif operation == "inspect":
                 data = await self._inspect(request["cluster"])
+            elif operation == "resources":
+                data = await self._resources(request["cluster"], request["namespaces"], reader)
             else:
                 await self._kubectl(request["cluster"], reader, writer)
                 return
@@ -284,7 +330,9 @@ class Authorization:
 
 
 @contextlib.asynccontextmanager
-async def _client(identity: str, operation: str, cluster: str | None = None):
+async def _client(
+    identity: str, operation: str, cluster: str | None = None, *, namespaces: tuple[str, ...] = ()
+):
     path = socket_path(identity)
     _check_socket(path)
     writer = None
@@ -292,9 +340,11 @@ async def _client(identity: str, operation: str, cluster: str | None = None):
         async with asyncio.timeout(90):
             reader, writer = await asyncio.open_unix_connection(path, limit=FRAME_LIMIT)
             _check_peer(writer)
-            request = {"operation": operation}
+            request: dict = {"operation": operation}
             if cluster is not None:
                 request["cluster"] = cluster
+            if operation == "resources":
+                request["namespaces"] = list(namespaces)
             await _send(writer, request)
             response = await _receive(reader)
             if "error" in response:
@@ -311,9 +361,11 @@ async def _client(identity: str, operation: str, cluster: str | None = None):
                 await writer.wait_closed()
 
 
-async def request(identity: str, operation: str, cluster: str | None = None) -> dict:
-    """Run one metadata or close operation through an existing authorization."""
-    async with _client(identity, operation, cluster) as (_, data):
+async def request(
+    identity: str, operation: str, cluster: str | None = None, *, namespaces: tuple[str, ...] = ()
+) -> dict:
+    """Run a metadata, resource or close operation through existing authorization."""
+    async with _client(identity, operation, cluster, namespaces=namespaces) as (_, data):
         return data
 
 

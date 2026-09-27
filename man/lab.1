@@ -3,7 +3,8 @@
 .\"
 .TH "LAB" "1" "September 26, 2026" "Labrys" "User Commands"
 .SH Name
-lab \- manage Kubeflow notebooks from a terminal
+lab \- inspect cluster resources and manage Kubeflow notebooks from a
+terminal
 .SH Synopsis
 .IP
 .EX
@@ -14,6 +15,7 @@ lab session start [\-\-request\-auth | \-\-token\-stdin] [\-\-json]
 lab session close SESSION [\-\-json]
 lab cluster list \-\-session SESSION [\-\-json]
 lab cluster inspect CLUSTER \-\-session SESSION [\-\-json]
+lab resources \-\-session SESSION \-\-cluster CLUSTER [\-\-namespace NAMESPACE ...] [\-\-json]
 lab kubectl \-\-session SESSION \-\-cluster CLUSTER \-\- COMMAND [ARGS...]
 lab notebook COMMAND \-\-cluster CLUSTER [OPTIONS]
 lab auth \-\-request PATH
@@ -32,8 +34,10 @@ window, and start, stop or delete the Notebook.
 Interactive lab and standalone Notebook commands each own one cluster
 connection.
 For repeated CLI access, \f[CR]lab session start\f[R] holds
-authorization while other commands discover clusters and run kubectl.
-Each kubectl client gets its own connection to one selected cluster.
+authorization while other commands discover clusters, inspect resources
+and run kubectl.
+Each resource query and kubectl client gets its own connection to one
+selected cluster.
 .PP
 Keep the owning lab process running while using its connections.
 Closing local access does not stop or delete remote Notebooks.
@@ -79,7 +83,8 @@ Editor access requires \f[CR]code\f[R] on \f[CR]PATH\f[R]; the adapter
 currently accepts VS Code 1.137.0 with Dev Containers 0.469.0.
 Other versions are rejected by the compatibility check.
 .SH Interactive use
-The session menu offers Notebook actions and connection controls.
+The session menu offers Notebook actions, Cluster resources and
+connection controls.
 Choose an action or type a Notebook command without the
 \f[CR]lab notebook\f[R] prefix, for example
 \f[CR]list \-\-namespace research\f[R].
@@ -106,6 +111,62 @@ Loading a preset fills the form; editing the form does not change the
 saved preset.
 The menu\(cqs \f[CR]save\-preset\f[R] action can also save a completed
 creation by operation ID.
+.SS Cluster resources
+Choose \f[B]Cluster resources\f[R] or type \f[CR]resources\f[R] in the
+session menu to browse node inventory and resource headroom.
+The usual namespace form appears first; its answer is remembered as a
+discovery hint, not a restriction on aggregation.
+Login remains independent of namespace.
+The overview summarizes the cluster; the node list supports search,
+filters, sorting and pagination.
+\f[CR]Enter\f[R] shows a node\(cqs allocatable resources, observed
+reservations and taints.
+This view uses the current connection and does not require a Notebook
+creation profile.
+For noninteractive use,
+\f[CR]lab resources \-\-session SESSION \-\-cluster CLUSTER\f[R] prints
+a table from the same resource reader.
+Add \f[CR]\-\-json\f[R] for structured output.
+.PP
+Use \f[CR]/\f[R] to search, arrow keys to move, Left/Right or Page
+Up/Down to change pages, \f[CR]f\f[R] to filter by headroom,
+\f[CR]t\f[R] to filter advertised model labels, and \f[CR]s\f[R] to
+sort.
+\f[CR]g\f[R] selects an extended resource type, keeping different GPU
+partitions and shared resource units separate.
+\f[CR]c\f[R] clears filters, \f[CR]r\f[R] refreshes, \f[CR]?\f[R] shows
+help, and Escape returns.
+CPU and memory are shown alongside the selected resource.
+.PP
+The calculation subtracts effective requests of visible, assigned pods
+from each node\(cqs allocatable resources.
+It includes init containers, restartable sidecars, pod\-level budgets
+and overhead.
+These are reservations, not measured utilization.
+Completed and unassigned pods are filtered by the API server before
+pagination; assigned Pending and terminating pods remain counted.
+Requests that cannot be reliably accounted for, including resizing pods
+and DRA claims, are excluded from observed reservations and the result
+is labelled as an upper bound.
+Other readable reservations still contribute.
+DRA device inventory is not included.
+.PP
+Lab first attempts cluster\-wide pod listing.
+If access is denied, it discovers namespace names and queries each one
+independently, adding names from this cluster\(cqs history, optional
+creation profile and selected kubeconfig context.
+Unreadable namespaces do not discard reservations found in readable
+namespaces.
+Partial observations show \f[CR]≤\f[R] upper bounds.
+If no reservations can be read, the view still shows allocatable
+capacity ceilings without claiming that devices are free.
+Kubernetes can deny namespace discovery too; \f[CR]n\f[R] adds extra
+namespace names and Lab remembers them for future visits.
+.PP
+The overview\(cqs remaining totals use Ready, uncordoned nodes.
+Taints, namespace quotas, queued work and other placement rules may
+further restrict what a job can obtain.
+Refresh failures keep the previous timestamped snapshot with a warning.
 .SH AI agents and automation
 Use a Notebook prepared by the user by default.
 Create, start, stop or delete a Notebook only when the user explicitly
@@ -150,6 +211,46 @@ credentials.
 A missing profile is reported but does not prevent kubectl access.
 Profile namespaces describe creation rules, not the full set of
 namespaces the Kubernetes credential can access.
+.PP
+Query resource availability without navigating the TUI:
+.IP
+.EX
+lab resources \-\-session lab\-session\-example \-\-cluster research\-example \(rs
+  \-\-namespace research \-\-json
+.EE
+.PP
+Repeat \f[CR]\-\-namespace\f[R] to add discovery hints.
+Lab also uses the selected kubeconfig context\(cqs explicit namespace
+and optional profile namespaces; it still attempts cluster\-wide reads
+and every namespace it can discover.
+The reusable CLI session does not need the encrypted Notebook history or
+its encryption key.
+.PP
+Read \f[CR]data.partial\f[R], \f[CR]data.scope\f[R] and
+\f[CR]data.issues\f[R] before interpreting the numbers.
+\f[CR]data.nodes\f[R] contains per\-node counts; \f[CR]data.summary\f[R]
+contains totals.
+Counts use the units in \f[CR]data.units\f[R]: CPU is an integer number
+of millicores, memory is an integer number of bytes, and extended
+resources are integer units.
+GPU resource units can represent devices, partitions or shared slots.
+.PP
+\f[CR]observed_reserved: null\f[R] means no reservations were readable,
+not zero usage.
+\f[CR]remaining_upper_bound\f[R] is never a scheduling guarantee.
+It is \f[CR]null\f[R] for nodes that are NotReady or cordoned; remaining
+totals include Ready, uncordoned nodes only.
+Namespace quotas, taints and workload placement can further restrict
+access.
+Individual node \f[CR]issue\f[R] values describe incomplete accounting.
+A successful partial query has status \f[CR]partial\f[R] and exit code
+0; authentication, transport and other failures use the usual error
+result and nonzero exit code.
+.PP
+The command prints one JSON document, never prompts for input, and
+closes its own connection without closing the reusable authorization.
+Use a fresh session after upgrading Labrys to make newly added commands
+available in the session owner.
 .PP
 Use native kubectl to find the user\(cqs Notebook and its Pod:
 .IP
@@ -253,6 +354,93 @@ The profile contains the local creation rules.
 If it is unavailable, \f[CR]profile\f[R] is null and
 \f[CR]profile_error\f[R] explains why.
 Kubernetes credentials and 1Password item bodies are not returned.
+.SS resources
+Read a fresh node resource snapshot using
+\f[CR]\-\-session SESSION \-\-cluster CLUSTER\f[R].
+The default output is a text table.
+\f[CR]\-\-json\f[R] emits the standard Labrys result envelope with
+\f[CR]schema_version: 1\f[R], \f[CR]operation: \(dqresources\(dq\f[R], a
+cluster target, and the following \f[CR]data\f[R] fields:
+.PP
+.TS
+tab(@);
+lw(35.0n) lw(35.0n).
+T{
+Field
+T}@T{
+Meaning
+T}
+_
+T{
+\f[CR]observed_at\f[R]
+T}@T{
+UTC observation timestamp.
+T}
+T{
+\f[CR]scope.all_namespaces\f[R]
+T}@T{
+Whether cluster\-wide pod listing succeeded.
+T}
+T{
+\f[CR]scope.namespaces\f[R]
+T}@T{
+Successfully read namespace names, or \f[CR]null\f[R] for a
+cluster\-wide read.
+An empty array means no pod data was obtained.
+T}
+T{
+\f[CR]partial\f[R]
+T}@T{
+Whether namespace coverage or reservation accounting is incomplete.
+T}
+T{
+\f[CR]units\f[R]
+T}@T{
+Resource\-name mapping to \f[CR]millicores\f[R], \f[CR]bytes\f[R] or
+extended\-resource \f[CR]units\f[R].
+T}
+T{
+\f[CR]summary\f[R]
+T}@T{
+Node counts, total allocatable resources, observed reservations and
+remaining upper bounds on Ready, uncordoned nodes.
+T}
+T{
+\f[CR]nodes\f[R]
+T}@T{
+Per\-node name, state, taints, model labels, allocatable resources,
+observed reservations, remaining upper bounds and an optional
+\f[CR]issue\f[R].
+T}
+T{
+\f[CR]issues\f[R]
+T}@T{
+Discovery or namespace\-read warnings.
+T}
+.TE
+.PP
+Resource values are integers; JSON values are not rounded or formatted
+with \f[CR]≤\f[R].
+The \f[CR]remaining_upper_bound\f[R] name carries that meaning.
+\f[CR]observed_reserved\f[R] is \f[CR]null\f[R] when no pod reservations
+were readable.
+Per\-node \f[CR]remaining_upper_bound\f[R] is \f[CR]null\f[R] when the
+node is not Ready or is cordoned.
+Omitted resource keys mean that the node did not advertise that
+resource.
+The report includes CPU, memory and advertised extended resources,
+without raw Pod objects or credentials.
+Reports still contain cluster metadata; do not use live reports as
+public examples or test fixtures.
+.PP
+\f[CR]\-\-namespace NAME\f[R] adds a discovery hint and can be repeated.
+It does not limit the query to those namespaces.
+Existing permissions still determine which reads succeed; a missing
+creation profile does not prevent the command from running.
+The command does not prompt or accept a new token, and it leaves the
+reusable authorization open.
+It closes its own cluster connection, including when the caller
+disconnects or authorization expires.
 .SS kubectl \(en COMMAND [ARGS\&...]
 With \f[CR]\-\-session SESSION \-\-cluster CLUSTER\f[R], run the
 installed kubectl through a fresh connection using the existing
@@ -411,7 +599,8 @@ T}
 T{
 \f[CR]\-\-namespace NAMESPACE\f[R]
 T}@T{
-Explicit Kubernetes namespace; there is no implicit \f[CR]default\f[R].
+Explicit Notebook namespace, or a repeatable discovery hint for
+\f[CR]resources\f[R]; there is no implicit \f[CR]default\f[R].
 T}
 T{
 \f[CR]\-\-token\-stdin\f[R]
@@ -430,7 +619,8 @@ T{
 \f[CR]\-\-json\f[R]
 T}@T{
 Write one JSON result to stdout.
-Available for standalone Notebook commands except \f[CR]shell\f[R] and
+Available for \f[CR]resources\f[R], session/cluster metadata commands,
+and standalone Notebook commands except \f[CR]shell\f[R] and
 \f[CR]open\f[R].
 T}
 T{
@@ -443,8 +633,9 @@ T}
 T{
 \f[CR]\-\-session SESSION\f[R]
 T}@T{
-Existing local authorization for \f[CR]cluster list\f[R],
-\f[CR]cluster inspect\f[R] and \f[CR]kubectl\f[R].
+Existing local authorization for \f[CR]resources\f[R],
+\f[CR]cluster list\f[R], \f[CR]cluster inspect\f[R] and
+\f[CR]kubectl\f[R].
 T}
 T{
 \f[CR]\-\-cluster\-id CLUSTER\f[R]
@@ -497,6 +688,8 @@ T}
 are interactive setup commands.
 \f[CR]cluster list\f[R] and \f[CR]cluster inspect\f[R] use an existing
 session and accept \f[CR]\-\-json\f[R].
+\f[CR]resources\f[R] also requires \f[CR]\-\-cluster\f[R] and accepts
+repeatable \f[CR]\-\-namespace\f[R] hints.
 .SS Creation options
 Without a preset, supply name, namespace, owner, image, GPU count and
 all three paths.

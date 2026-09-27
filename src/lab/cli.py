@@ -1,4 +1,4 @@
-"""Interactive Notebook workflows and reusable command-line authorization."""
+"""Notebook workflows, resource snapshots and reusable command-line authorization."""
 
 import argparse
 import asyncio
@@ -106,7 +106,7 @@ def parser() -> Parser:
     common.add_argument(
         "--cluster",
         default=argparse.SUPPRESS,
-        help="Registered cluster ID; required for standalone Notebook commands",
+        help="Registered cluster ID; required for resources, kubectl and standalone Notebooks",
     )
     common.add_argument(
         "--yes",
@@ -117,7 +117,8 @@ def parser() -> Parser:
     )
     root = Parser(
         prog="lab",
-        description="Manage Kubeflow notebooks. Run without a subcommand for the interactive menu.",
+        description="Inspect cluster resources and manage Kubeflow notebooks. "
+        "Run without a subcommand for the interactive menu.",
         epilog="Exiting lab disconnects local clients and leaves Notebooks running.",
         parents=[common],
     )
@@ -131,7 +132,9 @@ def parser() -> Parser:
     cluster = commands.add_parser("cluster", help="Register cluster connections")
     cluster_actions = cluster.add_subparsers(dest="action", required=True)
     add = cluster_actions.add_parser("add", help="Bind a prepared private profile")
-    add.add_argument("--cluster-id", help="Name of a prepared profile, for example research-h200")
+    add.add_argument(
+        "--cluster-id", help="Name of a prepared profile, for example research-example"
+    )
     remove = cluster_actions.add_parser("remove", help="Remove a connection from the index")
     remove.add_argument(
         "--cluster-id", help="Registered cluster name; omit to select from the list"
@@ -168,6 +171,19 @@ def parser() -> Parser:
     )
     kubectl.add_argument("--cluster", default=argparse.SUPPRESS, help="Registered cluster ID")
     kubectl.add_argument("arguments", nargs=argparse.REMAINDER, help="kubectl arguments after --")
+    resources = commands.add_parser(
+        "resources", help="Inspect node resource headroom using a live session", parents=[clients]
+    )
+    resources.add_argument("--cluster", default=argparse.SUPPRESS, help="Registered cluster ID")
+    resources.add_argument(
+        "--namespace",
+        action="append",
+        default=[],
+        help="Namespace discovery hint; repeat to supply more names",
+    )
+    resources.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS, help="Write a JSON snapshot"
+    )
     notebook = commands.add_parser("notebook", help="Manage Kubernetes Notebooks", parents=[common])
     actions = notebook.add_subparsers(dest="action", required=True)
     for action, description in ACTIONS.items():
@@ -228,11 +244,15 @@ def validate_arguments(args, *, interactive=False) -> None:
             raise LabError(
                 "Only session start accepts authentication options; --yes is not needed.", 2
             )
-        if args.command != "kubectl" and args.cluster:
+        if args.command not in {"kubectl", "resources"} and args.cluster:
             raise LabError("Use the registered cluster ID argument with cluster inspect.", 2)
         if not starting:
             access.socket_path(args.session)
-        identity = args.cluster if args.command == "kubectl" else getattr(args, "cluster_id", None)
+        identity = (
+            args.cluster
+            if args.command in {"kubectl", "resources"}
+            else getattr(args, "cluster_id", None)
+        )
         if identity is not None:
             try:
                 cluster_name(identity)
@@ -247,6 +267,14 @@ def validate_arguments(args, *, interactive=False) -> None:
                 raise LabError("Separate kubectl arguments with --.", 2)
             if len(args.arguments) == 1:
                 raise LabError("Supply a kubectl command after --.", 2)
+        if args.command == "resources":
+            if not args.cluster:
+                raise LabError("resources requires --cluster.", 2)
+            try:
+                for namespace in args.namespace:
+                    namespace_name(namespace)
+            except (ValueError, TypeError):
+                raise LabError("Invalid namespace hint.", 2) from None
         return
     if args.command == "auth":
         if args.json or args.token_stdin or args.request_auth or args.cluster or args.yes:
@@ -612,7 +640,7 @@ async def until_deadline(deadline: float, operation):
 
 
 def uses_access(args) -> bool:
-    return args.command in {"session", "kubectl"} or (
+    return args.command in {"session", "kubectl", "resources"} or (
         args.command == "cluster" and args.action in {"list", "inspect"}
     )
 
@@ -649,6 +677,19 @@ async def run_access(args) -> dict | int | None:
             return None
         if args.command == "kubectl":
             return await access.kubectl(args.session, args.cluster, args.arguments[1:])
+        if args.command == "resources":
+            data = await access.request(
+                args.session, "resources", args.cluster, namespaces=tuple(args.namespace)
+            )
+            if not args.json:
+                presentation.resources(args.cluster, data)
+            return emit(
+                "resources",
+                "partial" if data["partial"] else "ok",
+                target={"cluster": args.cluster},
+                data=data,
+                machine=True,
+            )
         data = await access.request(args.session, args.action, getattr(args, "cluster_id", None))
         result = emit(f"{args.command}.{args.action}", "ok", data=data, machine=True)
         if not args.json:

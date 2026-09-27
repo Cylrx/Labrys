@@ -345,9 +345,97 @@ async def test_grouped_session_menu_and_back_navigation(app):
     app.ui.answers["Namespace"] = [LabError("Cancelled", 130)]
     await app.run()
     sections = next(args[0] for title, args in app.ui.events if title == "Session menu")
-    assert [heading for heading, _ in sections] == ["NOTEBOOKS", "MANAGE", "SESSION"]
+    assert [heading for heading, _ in sections] == ["NOTEBOOKS", "CLUSTER", "MANAGE", "SESSION"]
     assert any(title == "Session status" for title, _ in app.ui.events)
     assert app.service.api.posts == []
+
+
+async def test_resources_menu_uses_existing_session_without_creation_policy(app, monkeypatch):
+    browse = AsyncMock()
+    monkeypatch.setattr(interface, "browse_resources", browse)
+    app.ui.answers["Session menu"] = ["resources", "exit"]
+    app.ui.answers["Namespace"] = [{"namespace": "research"}]
+    await app.run()
+    browse.assert_awaited_once_with(app.service.api, app.ui, ("research",))
+    assert app.service.api.posts == []
+
+
+async def test_resource_namespace_prompt_cancels_before_loading(app, monkeypatch):
+    browse = AsyncMock()
+    monkeypatch.setattr(interface, "browse_resources", browse)
+    app.ui.answers["Namespace"] = [LabError("Cancelled", 130)]
+    with pytest.raises(LabError):
+        await app.resources()
+    browse.assert_not_called()
+
+
+async def test_resource_namespace_is_remembered_even_if_loading_fails(app, monkeypatch):
+    app.ui.answers["Namespace"] = [{"namespace": "chosen"}]
+    monkeypatch.setattr(
+        interface, "browse_resources", AsyncMock(side_effect=LabError("Disconnected", 5))
+    )
+    with pytest.raises(LabError, match="Disconnected"):
+        await app.resources()
+    assert app.service.history.candidates(CLUSTER_ID, "", "namespace")[0] == "chosen"
+
+
+async def test_resource_discovery_does_not_persist_or_display_kubeconfig_credentials(
+    app, monkeypatch
+):
+    import json
+
+    from fixtures import cluster_data
+
+    sensitive = "synthetic-credential-do-not-persist-or-display"
+    data = cluster_data()
+    config = yaml.safe_load(data["kubernetes"]["kubeconfig"])
+    for user in config["users"]:
+        user["user"]["token"] = sensitive
+    data["kubernetes"]["kubeconfig"] = yaml.safe_dump(config)
+    app.service.cluster = cluster(data)
+    app.ui.answers["Namespace"] = [{"namespace": "research"}]
+    monkeypatch.setattr(interface, "browse_resources", AsyncMock(return_value=("extra",)))
+    await app.resources()
+    assert sensitive not in json.dumps(app.service.history.history.read())
+    assert sensitive not in repr(app.ui.events)
+    assert set(app.service.history.candidates(CLUSTER_ID, "", "namespace")) == {"research", "extra"}
+
+
+async def test_resource_namespace_hints_work_without_profile_and_remember_new_names(
+    app, monkeypatch
+):
+    app.service.history.remember(CLUSTER_ID, "remembered", {})
+    app.ui.answers["Namespace"] = [{"namespace": "remembered"}]
+
+    def missing_profile():
+        raise LabError("Profile not found", 4)
+
+    monkeypatch.setattr(app.service, "profile", missing_profile)
+    browse = AsyncMock(return_value=("remembered", "additional"))
+    monkeypatch.setattr(interface, "browse_resources", browse)
+    await app.resources()
+    browse.assert_awaited_once_with(app.service.api, app.ui, ("remembered",))
+    assert app.service.history.candidates(CLUSTER_ID, "", "namespace") == [
+        "additional",
+        "remembered",
+    ]
+
+
+async def test_resource_namespace_hints_include_the_selected_kubeconfig_context(app, monkeypatch):
+    from fixtures import cluster_data
+
+    data = cluster_data()
+    config = yaml.safe_load(data["kubernetes"]["kubeconfig"])
+    for item in config["contexts"]:
+        if item["name"] == data["kubernetes"]["context"]:
+            item["context"]["namespace"] = "context-namespace"
+    data["kubernetes"]["kubeconfig"] = yaml.safe_dump(config)
+    app.service.cluster = cluster(data)
+    app.ui.answers["Namespace"] = [{"namespace": "research"}]
+    browse = AsyncMock(return_value=())
+    monkeypatch.setattr(interface, "browse_resources", browse)
+    await app.resources()
+    browse.assert_awaited_once_with(app.service.api, app.ui, ("research", "context-namespace"))
 
 
 async def test_blank_gpu_count_does_not_silently_create_a_cpu_notebook(app):

@@ -55,7 +55,7 @@ def main() -> int:
     ]
     stopping = False
 
-    def stop(signum: int, frame: object) -> None:
+    def stop(_signum: int, _frame: object) -> None:
         nonlocal stopping
         stopping = True
 

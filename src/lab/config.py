@@ -130,7 +130,7 @@ def cluster_name(value: str) -> str:
     return value
 
 
-def quantity(value: str, *, cpu: bool = False) -> int:
+def quantity(value: str, *, cpu: bool = False, allow_zero: bool = False) -> int:
     """Return exact millicores or bytes, rejecting rounding and overflow."""
     match = re.fullmatch(
         r"([+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))([eE][+-]?[0-9]+|[numkKMGTPE]|[KMGTPE]i)?", value
@@ -168,7 +168,12 @@ def quantity(value: str, *, cpu: bool = False) -> int:
             result = Decimal(match[1]) * factor * (1000 if cpu else 1)
     except InvalidOperation:
         raise ValueError("Invalid resource quantity") from None
-    if result <= 0 or result != result.to_integral_value() or result > 2**63 - 1:
+    if (
+        result < 0
+        or (result == 0 and not allow_zero)
+        or result != result.to_integral_value()
+        or result > 2**63 - 1
+    ):
         raise ValueError("Quantity must be positive, exact and within supported bounds")
     return int(result)
 
@@ -399,6 +404,20 @@ class NamespaceRule(Model):
 class Kubernetes(Model):
     context: Text
     kubeconfig: SecretStr
+
+    @property
+    def namespace(self) -> str | None:
+        """Return only the explicitly configured namespace of the selected context."""
+        document = safe_document(self.kubeconfig.get_secret_value())
+        for item in document["contexts"]:
+            if item["name"] == self.context and item["context"].get("namespace"):
+                try:
+                    return namespace_name(item["context"]["namespace"])
+                except (TypeError, ValueError):
+                    raise LabError(
+                        "Invalid namespace in the selected kubeconfig context.", 4
+                    ) from None
+        return None
 
 
 class Connection(Model):

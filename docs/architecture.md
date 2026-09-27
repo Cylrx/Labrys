@@ -75,6 +75,17 @@ rebuilding the screen between prompts. It releases the terminal when a container
 shell takes over. `document` wraps text for display while retaining the original
 content for copying, so visual wrapping cannot corrupt a kubeconfig.
 
+`resources` reads node inventory and visible pod requests through the existing
+Kubernetes client. It produces a snapshot with explicit namespace coverage and
+unknown accounting. `resource_view` renders that snapshot in the session's
+existing terminal application, with bounded pages and a native search buffer.
+The view requires neither a creation profile nor cluster-specific resource ratios.
+The `resources` CLI command uses the same reader through the existing authorization
+socket. Its connection is owned by that request and closes on completion,
+cancellation or authorization expiry. Only the resource report crosses the socket;
+the client receives no Kubernetes credential grant. Text and JSON output consume
+the same report, with explicit units, namespace coverage and upper-bound values.
+
 ## Editor recovery
 
 Restarting VS Code Server is disabled until an exact image and editor build have
@@ -105,6 +116,9 @@ uv run --locked mypy src/lab
 
 The tests use synthetic credentials and simulated APIs. Changes to cluster or
 editor integrations also need checks in the intended environment.
+Fixtures must use entirely fictional identifiers, device labels and resource
+values. Do not copy live output or screenshots into fixtures, even with renamed
+prefixes; naming patterns and hardware configurations can identify a deployment.
 
 `docs/manual.md` is the source for the terminal manual. After editing it, regenerate
 `man/lab.1` with [Pandoc](https://pandoc.org/installing.html):

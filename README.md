@@ -13,6 +13,12 @@ If your setup looks similar, it might be useful.
 
 Run it with `lab`, or `labrys` if you prefer the full name. They are the same command.
 
+The **Cluster resources** menu shows node-level GPU resource units, CPU and memory
+headroom, with search and pagination for larger clusters. Limited namespace access
+is shown explicitly as an upper bound.
+`lab resources --session SESSION --cluster CLUSTER` exposes the same calculation
+as a text table; add `--json` for agents and scripts.
+
 <div align="center">
   <img src="assets/demo.gif" alt="A demo video" width="1008" />
 </div>
@@ -48,7 +54,7 @@ After updating the checkout, run `uv tool install --python 3.12 --force .` to
 replace the installed version.
 
 For an agent or repeated CLI work, start with `lab session start --request-auth`.
-One authorization supports cluster discovery and native kubectl access; follow
+One authorization supports cluster discovery, resource snapshots and native kubectl access; follow
 the [agent workflow](docs/manual.md#ai-agents-and-automation).
 
 ## Documentation

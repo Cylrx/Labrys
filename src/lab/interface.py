@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 import yaml
 from pydantic import ValidationError
 
 from lab import editor_recovery
+from lab.config import namespace_name
 from lab.display import display_session, release_display
 from lab.editor import open_editor, open_shell
 from lab.errors import LabError
@@ -25,6 +27,7 @@ from lab.notebook_status import (
 )
 from lab.notebooks import STOP_ANNOTATION, Notebooks, require_running_request
 from lab.policy import Profile
+from lab.resource_view import browse_resources
 from lab.tools import Toolchain
 from lab.ui import Field, Screens
 
@@ -140,6 +143,10 @@ class Interactive:
                             ],
                         ),
                         (
+                            "CLUSTER",
+                            [("resources", "Cluster resources")],
+                        ),
+                        (
                             "MANAGE",
                             [
                                 ("start", "Start Notebook"),
@@ -188,6 +195,8 @@ class Interactive:
                     await self.ui.work(session.reconnect(), "Reconnecting")
                 elif editor_only:
                     raise LabError("Available actions: status, reconnect, disconnect.", 2)
+                elif command == "resources":
+                    await self.resources()
                 elif command.startswith("operation:"):
                     await self.operation(command.removeprefix("operation:"))
                 elif command == "operations":
@@ -270,7 +279,27 @@ class Interactive:
             [("back", "Session menu")],
         )
 
-    async def namespace(self) -> str:
+    async def resources(self) -> None:
+        """Seed discovery from this cluster's existing settings and remember additional names."""
+        namespace = await self.namespace(
+            "Enter a namespace you can read. This helps discovery; "
+            "resource totals still include every readable namespace Lab finds."
+        )
+        self.service.history.remember(self.cluster_id, namespace, {})
+        namespaces = self.service.history.candidates(self.cluster_id, "", "namespace")
+        with suppress(LabError):
+            namespaces.extend(self.service.profile().namespace_rules)
+        if configured := self.service.cluster.kubernetes.namespace:
+            namespaces.append(configured)
+        known = tuple(dict.fromkeys(namespaces))
+        remembered = await browse_resources(self.service.api, self.ui, known)
+        for namespace in remembered:
+            if namespace not in known:
+                self.service.history.remember(self.cluster_id, namespace, {})
+
+    async def namespace(
+        self, description: str = "History belongs to this cluster. Enter any configured namespace."
+    ) -> str:
         values = await self.ui.form(
             "Namespace",
             [
@@ -281,11 +310,14 @@ class Interactive:
                     candidates=self.service.history.candidates(self.cluster_id, "", "namespace"),
                 )
             ],
-            description="History belongs to this cluster. Enter any configured namespace.",
+            description=description,
         )
         if not values["namespace"].strip():
             raise LabError("A namespace is required.", 2)
-        return values["namespace"].strip()
+        try:
+            return namespace_name(values["namespace"].strip())
+        except ValueError as error:
+            raise LabError(str(error), 2) from None
 
     async def dispatch(self, command: str) -> None:
         """Parse typed commands with the production parser and current scope."""

@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
@@ -34,6 +34,7 @@ from prompt_toolkit.layout import (
     Window,
     WindowAlign,
 )
+from prompt_toolkit.layout.containers import Container
 from prompt_toolkit.layout.controls import BufferControl, UIControl
 from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor, PasswordProcessor
@@ -47,6 +48,9 @@ from lab import clipboard
 from lab.display import current_display
 from lab.document import Document
 from lab.errors import LabError
+
+if TYPE_CHECKING:
+    from lab.resource_view import ResourceView
 
 T = TypeVar("T")
 
@@ -140,6 +144,7 @@ class SecretBuffer(Buffer):
         return super()._set_text(value)
 
     def save_to_undo_stack(self, clear_redo_stack: bool = True) -> None:
+        """Keep secret text out of undo history while preserving the Buffer interface."""
         pass
 
     def clear(self) -> None:
@@ -388,10 +393,10 @@ class UI:
         self.buttons: list[Action] = []
         self._footer: list[Action] = []
         self._body = HSplit([])
+        self.viewport: Container | None = None
         self._back: Callable | None = None
         self._help_text, self._help_open = "", False
         self._active_field: Input | None = None
-        self._timer: asyncio.TimerHandle | None = None
         self._generation = 0
         self.app: Application[Any] | None = None
 
@@ -502,6 +507,7 @@ class UI:
             self._paste = None
 
     def clear(self):
+        self.viewport = None
         self._clear_paste()
         for document in self.documents:
             document.clear()
@@ -521,6 +527,7 @@ class UI:
         self.reply = None
 
     def _begin(self, title, description, back, help_text):
+        self.viewport = None
         self._clear_paste()
         self.accepting = True
         for item in self.inputs.values():
@@ -536,8 +543,6 @@ class UI:
         self._copy_button = None
         if self._copy_task:
             self._copy_task.cancel()
-        if self._timer:
-            self._timer.cancel()
         self.title, self.description = title, description
         self.error_message = ""
         self._back, self._help_text, self._help_open = back, help_text, False
@@ -1006,17 +1011,6 @@ class UI:
         if self.app:
             self.app.layout.focus(self.buttons[0].control)
 
-    def schedule(self, delay_seconds, callback):
-        generation = self._generation
-        if self._timer:
-            self._timer.cancel()
-
-        def run():
-            if self._generation == generation:
-                self.invoke(callback)
-
-        self._timer = asyncio.get_running_loop().call_later(delay_seconds, run)
-
     def exit(self):
         if self.on_exit:
             self.on_exit()
@@ -1075,7 +1069,9 @@ class UI:
         def interrupt(event):
             self.exit()
 
-        @keys.add("<any>")
+        @keys.add(
+            "<any>", filter=Condition(lambda: self.command is not None or self._search is not None)
+        )
         def start_command(event):
             assert self.app is not None
             current = self.app.layout.current_control
@@ -1164,7 +1160,10 @@ class UI:
         )
         self.app = Application(
             clipboard=DynamicClipboard(self._editing_clipboard),
-            layout=Layout(root, focused_element=self.controls[0] if self.controls else None),
+            layout=Layout(
+                DynamicContainer(lambda: self.viewport if self.viewport is not None else root),
+                focused_element=self.controls[0] if self.controls else None,
+            ),
             key_bindings=keys,
             full_screen=False,
             mouse_support=True,
@@ -1190,8 +1189,6 @@ class UI:
         try:
             return await self.app.run_async()
         finally:
-            if self._timer:
-                self._timer.cancel()
             if self._copy_task:
                 if not self._copy_task.done():
                     self._copy_task.cancel()
@@ -1252,6 +1249,20 @@ class Screens:
             if display is None:
                 ui.clear()
                 ui.app = None
+
+    async def resources(self, view: ResourceView) -> str:
+        """Show the resource browser in the existing terminal application."""
+        ui = self._page()
+        respond = self._respond(ui)
+        ui._begin("Cluster resources", "", lambda: respond("back"), "")
+        generation = ui._generation
+        view.respond = respond
+        view.enabled = lambda: ui.accepting and ui._generation == generation
+        ui.viewport, ui.controls = view.window, [view]
+        if ui.app:
+            ui.app.layout = Layout(ui.app.layout.container, focused_element=view)
+            ui.app.invalidate()
+        return await self._show(ui)
 
     async def menu(
         self,

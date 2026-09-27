@@ -8,7 +8,7 @@ date: September 26, 2026
 
 # Name
 
-lab - manage Kubeflow notebooks from a terminal
+lab - inspect cluster resources and manage Kubeflow notebooks from a terminal
 
 # Synopsis
 
@@ -20,6 +20,7 @@ lab session start [--request-auth | --token-stdin] [--json]
 lab session close SESSION [--json]
 lab cluster list --session SESSION [--json]
 lab cluster inspect CLUSTER --session SESSION [--json]
+lab resources --session SESSION --cluster CLUSTER [--namespace NAMESPACE ...] [--json]
 lab kubectl --session SESSION --cluster CLUSTER -- COMMAND [ARGS...]
 lab notebook COMMAND --cluster CLUSTER [OPTIONS]
 lab auth --request PATH
@@ -37,7 +38,8 @@ and start, stop or delete the Notebook.
 
 Interactive lab and standalone Notebook commands each own one cluster connection.
 For repeated CLI access, `lab session start` holds authorization while other
-commands discover clusters and run kubectl. Each kubectl client gets its own
+commands discover clusters, inspect resources and run kubectl. Each resource query
+and kubectl client gets its own
 connection to one selected cluster.
 
 Keep the owning lab process running while using its connections. Closing local
@@ -78,7 +80,7 @@ Other versions are rejected by the compatibility check.
 
 # Interactive use
 
-The session menu offers Notebook actions and connection controls. Choose an
+The session menu offers Notebook actions, Cluster resources and connection controls. Choose an
 action or type a Notebook command without the `lab notebook` prefix, for example
 `list --namespace research`. Forms ask for missing values and show the manifest
 before creation.
@@ -97,6 +99,47 @@ Presets exclude the instance name and are scoped to the cluster and namespace.
 Loading a preset fills the form; editing the form does not change the saved
 preset. The menu's `save-preset` action can also save a completed creation by
 operation ID.
+
+## Cluster resources
+
+Choose **Cluster resources** or type `resources` in the session menu to browse
+node inventory and resource headroom. The usual namespace form appears first;
+its answer is remembered as a discovery hint, not a restriction on aggregation.
+Login remains independent of namespace. The overview summarizes the cluster; the
+node list supports search, filters, sorting and pagination. `Enter` shows a node's
+allocatable resources, observed reservations and taints. This view uses the
+current connection and does not require a Notebook creation profile.
+For noninteractive use, `lab resources --session SESSION --cluster CLUSTER`
+prints a table from the same resource reader. Add `--json` for structured output.
+
+Use `/` to search, arrow keys to move, Left/Right or Page Up/Down to change pages,
+`f` to filter by headroom, `t` to filter advertised model labels, and `s` to sort.
+`g` selects an extended resource type, keeping different GPU partitions and shared
+resource units separate. `c` clears filters, `r` refreshes, `?` shows help, and
+Escape returns. CPU and memory are shown alongside the selected resource.
+
+The calculation subtracts effective requests of visible, assigned pods from each
+node's allocatable resources. It includes init containers, restartable sidecars,
+pod-level budgets and overhead. These are reservations, not measured utilization.
+Completed and unassigned pods are filtered by the API server before pagination;
+assigned Pending and terminating pods remain counted.
+Requests that cannot be reliably accounted for, including resizing pods and DRA
+claims, are excluded from observed reservations and the result is labelled as an
+upper bound. Other readable reservations still contribute. DRA device inventory
+is not included.
+
+Lab first attempts cluster-wide pod listing. If access is denied, it discovers
+namespace names and queries each one independently, adding names from this
+cluster's history, optional creation profile and selected kubeconfig context.
+Unreadable namespaces do not discard reservations found in readable namespaces.
+Partial observations show `≤` upper bounds. If no reservations can be read, the
+view still shows allocatable capacity ceilings without claiming that devices are
+free. Kubernetes can deny namespace discovery too; `n` adds extra namespace names
+and Lab remembers them for future visits.
+
+The overview's remaining totals use Ready, uncordoned nodes. Taints, namespace
+quotas, queued work and other placement rules may further restrict what a job can
+obtain. Refresh failures keep the previous timestamped snapshot with a warning.
 
 # AI agents and automation
 
@@ -133,6 +176,36 @@ Listing reads the 1Password connection index. Inspection returns connection
 metadata and local creation rules, without credentials. A missing profile is
 reported but does not prevent kubectl access. Profile namespaces describe creation
 rules, not the full set of namespaces the Kubernetes credential can access.
+
+Query resource availability without navigating the TUI:
+
+```sh
+lab resources --session lab-session-example --cluster research-example \
+  --namespace research --json
+```
+
+Repeat `--namespace` to add discovery hints. Lab also uses the selected kubeconfig
+context's explicit namespace and optional profile namespaces; it still attempts
+cluster-wide reads and every namespace it can discover. The reusable CLI session
+does not need the encrypted Notebook history or its encryption key.
+
+Read `data.partial`, `data.scope` and `data.issues` before interpreting the numbers.
+`data.nodes` contains per-node counts; `data.summary` contains totals. Counts use
+the units in `data.units`: CPU is an integer number of millicores, memory is an
+integer number of bytes, and extended resources are integer units. GPU resource
+units can represent devices, partitions or shared slots.
+
+`observed_reserved: null` means no reservations were readable, not zero usage.
+`remaining_upper_bound` is never a scheduling guarantee. It is `null` for nodes
+that are NotReady or cordoned; remaining totals include Ready, uncordoned nodes
+only. Namespace quotas, taints and workload placement can further restrict access.
+Individual node `issue` values describe incomplete accounting. A successful
+partial query has status `partial` and exit code 0; authentication, transport and
+other failures use the usual error result and nonzero exit code.
+
+The command prints one JSON document, never prompts for input, and closes its own
+connection without closing the reusable authorization. Use a fresh session after
+upgrading Labrys to make newly added commands available in the session owner.
 
 Use native kubectl to find the user's Notebook and its Pod:
 
@@ -220,6 +293,40 @@ With `--session SESSION`, read the registered connection and return `id`,
 `context`, `server`, `transport` and `profile`. The profile contains the local
 creation rules. If it is unavailable, `profile` is null and `profile_error`
 explains why. Kubernetes credentials and 1Password item bodies are not returned.
+
+## resources
+
+Read a fresh node resource snapshot using `--session SESSION --cluster CLUSTER`.
+The default output is a text table. `--json` emits the standard Labrys result
+envelope with `schema_version: 1`, `operation: "resources"`, a cluster target,
+and the following `data` fields:
+
+| Field | Meaning |
+| --- | --- |
+| `observed_at` | UTC observation timestamp. |
+| `scope.all_namespaces` | Whether cluster-wide pod listing succeeded. |
+| `scope.namespaces` | Successfully read namespace names, or `null` for a cluster-wide read. An empty array means no pod data was obtained. |
+| `partial` | Whether namespace coverage or reservation accounting is incomplete. |
+| `units` | Resource-name mapping to `millicores`, `bytes` or extended-resource `units`. |
+| `summary` | Node counts, total allocatable resources, observed reservations and remaining upper bounds on Ready, uncordoned nodes. |
+| `nodes` | Per-node name, state, taints, model labels, allocatable resources, observed reservations, remaining upper bounds and an optional `issue`. |
+| `issues` | Discovery or namespace-read warnings. |
+
+Resource values are integers; JSON values are not rounded or formatted with `≤`.
+The `remaining_upper_bound` name carries that meaning. `observed_reserved` is
+`null` when no pod reservations were readable. Per-node `remaining_upper_bound`
+is `null` when the node is not Ready or is cordoned. Omitted resource keys mean
+that the node did not advertise that resource. The report includes CPU, memory
+and advertised extended resources, without raw Pod objects or credentials.
+Reports still contain cluster metadata; do not use live reports as public examples
+or test fixtures.
+
+`--namespace NAME` adds a discovery hint and can be repeated. It does not limit
+the query to those namespaces. Existing permissions still determine which reads
+succeed; a missing creation profile does not prevent the command from running.
+The command does not prompt or accept a new token, and it leaves the reusable
+authorization open. It closes its own cluster connection, including when the
+caller disconnects or authorization expires.
 
 ## kubectl -- COMMAND [ARGS...]
 
@@ -345,12 +452,12 @@ Inside a session, forms can ask for missing values.
 | Option | Meaning |
 | ----------------------- | ---------------------------------------------------- |
 | `--cluster CLUSTER` | Registered cluster ID. Also selects the cluster for an interactive session. |
-| `--namespace NAMESPACE` | Explicit Kubernetes namespace; there is no implicit `default`. |
+| `--namespace NAMESPACE` | Explicit Notebook namespace, or a repeatable discovery hint for `resources`; there is no implicit `default`. |
 | `--token-stdin` | Read one UTF-8 token line, at most 16 KiB, from stdin instead of the hidden prompt. |
 | `--request-auth` | Wait up to five minutes for a private token handoff from `lab auth`. Mutually exclusive with `--token-stdin`. |
-| `--json` | Write one JSON result to stdout. Available for standalone Notebook commands except `shell` and `open`. |
+| `--json` | Write one JSON result to stdout. Available for `resources`, session/cluster metadata commands, and standalone Notebook commands except `shell` and `open`. |
 | `--yes`, `-y` | Skip confirmation for start, stop, delete, retry or supported editor restart. Does not bypass validation or authorize later menu actions. |
-| `--session SESSION` | Existing local authorization for `cluster list`, `cluster inspect` and `kubectl`. |
+| `--session SESSION` | Existing local authorization for `resources`, `cluster list`, `cluster inspect` and `kubectl`. |
 | `--cluster-id CLUSTER` | Profile or registration to select for `cluster add` or `cluster remove`. |
 | `--operation-id UUID` | Creation receipt to inspect with `status` or reconcile with `retry`. Required for `retry`. |
 | `--pod POD` | Select a Ready owned Pod for shell, open or editor restart. |
@@ -362,6 +469,7 @@ Inside a session, forms can ask for missing values.
 
 `init`, `cluster add` and `cluster remove` are interactive setup commands.
 `cluster list` and `cluster inspect` use an existing session and accept `--json`.
+`resources` also requires `--cluster` and accepts repeatable `--namespace` hints.
 
 ## Creation options
 

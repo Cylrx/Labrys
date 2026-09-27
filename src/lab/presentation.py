@@ -1,22 +1,26 @@
 """Consistent, non-recording terminal presentation for human-readable output."""
 
-import sys
 from collections.abc import Sequence
 
 from rich import box
 from rich.console import Console
 from rich.padding import Padding
-from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich.theme import Theme
 
 from lab.notebook_status import pod_rows, state_label, status_description
+from lab.resources import amount
 
-THEME = Theme(
-    {"accent": "cyan bold", "muted": "dim", "label": "dim bold", "good": "green", "bad": "red"}
-)
+THEME = Theme({"accent": "cyan bold", "muted": "dim", "good": "green", "bad": "red"})
+_CONTROL_ESCAPES = {
+    code: f"\\x{code:02x}" for code in (*range(32), *range(127, 160)) if chr(code) not in "\n\t"
+}
+
+
+def _text(value: str, style: str = "") -> Text:
+    # Escape controls before Rich measures and wraps text; retain layout whitespace.
+    return Text(value.translate(_CONTROL_ESCAPES), style=style)
 
 
 def console(*, stderr: bool = False) -> Console:
@@ -29,25 +33,89 @@ def heading(
 ) -> None:
     screen = console(stderr=stderr)
     screen.print()
-    brand = Text.assemble(("◆ lab", "accent"), ("  /  ", "muted"), (title, "bold"))
+    brand = Text.assemble(("◆ lab", "accent"), ("  /  ", "muted"), _text(title, "bold"))
     if step:
-        brand.append(f"    {step}", style="muted")
+        brand.append(_text(f"    {step}", "muted"))
     screen.print(brand)
     if description:
-        screen.print(Padding(Text(description, style="muted"), (0, 0, 0, 2)))
+        screen.print(Padding(_text(description, "muted"), (0, 0, 0, 2)))
     screen.print()
 
 
 def note(message: str, *, stderr: bool = False) -> None:
-    console(stderr=stderr).print(Text(message, style="muted"))
+    console(stderr=stderr).print(_text(message, "muted"))
 
 
-def question(title: str, description: str = "") -> None:
+def resources(cluster: str, data: dict) -> None:
+    """Print one finite table from the same snapshot exported by the JSON command."""
     screen = console()
-    screen.print()
-    screen.print(Text.assemble(("  ◇ ", "accent"), (title, "bold")))
-    if description:
-        screen.print(Padding(Text(description, style="muted"), (0, 0, 0, 4)))
+    scope = data["scope"]
+    coverage = (
+        "All namespaces"
+        if scope["all_namespaces"]
+        else ", ".join(scope["namespaces"]) or "No pod data"
+    )
+    heading("Cluster resources", f"{cluster} · {data['observed_at']} · {coverage}")
+    note(
+        "Remaining values are upper bounds; quotas and placement rules can further restrict access."
+    )
+    if data["partial"]:
+        note("Partial snapshot: only observed reservations are subtracted.")
+    for issue in data["issues"]:
+        note(issue)
+
+    def bound(value, key):
+        return "?" if value is None else "≤" + amount(value, key)
+
+    def headroom(node, key):
+        left = node["remaining_upper_bound"]
+        return "—" if left is None or key not in left else bound(left[key], key)
+
+    remaining = data["summary"]["remaining_upper_bound"]
+    note(
+        f"{data['summary']['nodes']} nodes · {data['summary']['ready_nodes']} Ready · "
+        f"CPU {bound(remaining.get('cpu'), 'cpu')} cores · "
+        f"RAM {bound(remaining.get('memory'), 'memory')} GiB"
+    )
+    table = Table(box=box.SIMPLE, show_edge=False, padding=(0, 1))
+    table.add_column("Node", style="bold", overflow="fold")
+    table.add_column("State")
+    table.add_column("CPU cores\nremaining", justify="right")
+    table.add_column("RAM GiB\nremaining", justify="right")
+    extended = [key for key in data["units"] if key not in {"cpu", "memory"}]
+    for key in extended:
+        observed = data["summary"]["observed_reserved"]
+        reserved = amount(observed.get(key), key) if observed is not None else "?"
+        total = amount(data["summary"]["allocatable"].get(key), key)
+        note(
+            f"{key}: {reserved} / {total} observed reserved · "
+            f"{bound(remaining.get(key), key)} remaining"
+        )
+        table.add_column(
+            _text(key + "\nreserved / total · remaining"), justify="right", overflow="fold"
+        )
+    for node in data["nodes"]:
+        cells = [
+            node["name"],
+            node["state"] + ("*" if node["taints"] else ""),
+            headroom(node, "cpu"),
+            headroom(node, "memory"),
+        ]
+        for key in extended:
+            if key not in node["allocatable"]:
+                cells.append("—")
+                continue
+            observed = node["observed_reserved"]
+            reserved = amount(observed.get(key), key) if observed is not None else "?"
+            cells.append(
+                f"{reserved} / {amount(node['allocatable'][key], key)} · {headroom(node, key)}"
+            )
+        table.add_row(*(_text(cell) for cell in cells))
+    screen.print(table)
+    note(
+        "Reserved counts are observed only. * marks tainted nodes. "
+        "Use --json for models and per-node warnings."
+    )
 
 
 def details(rows: Sequence[tuple[str, str]], title: str | None = None, *, stderr=False) -> None:
@@ -55,73 +123,27 @@ def details(rows: Sequence[tuple[str, str]], title: str | None = None, *, stderr
     table.add_column(style="muted", no_wrap=True)
     table.add_column(overflow="fold")
     for name, value in rows:
-        table.add_row(Text(name), Text(value))
+        table.add_row(_text(name), _text(value))
     screen = console(stderr=stderr)
     if title:
-        screen.print(Text(title, style="bold"))
+        screen.print(_text(title, "bold"))
     screen.print(Padding(table, (0, 0, 1, 2)))
 
 
-def item_guide(
-    *, purpose: str, description: str, title: str, category: str, field: str, notes: str = ""
-) -> None:
-    screen = console()
-    screen.print(
-        Panel(
-            Text(description),
-            title=Text(purpose, style="accent"),
-            title_align="left",
-            box=box.ROUNDED,
-            border_style="dim",
-            padding=(1, 2),
-            width=min(screen.width, 88),
-        )
-    )
-    details(
-        [
-            ("In 1Password", "Create a new item in the vault your Service Account can read"),
-            ("Category", category),
-            ("Title", title),
-            ("Field", field),
-        ]
-    )
-    if notes:
-        screen.print(Text("Optional item notes", style="label"))
-        screen.print(Text(notes, style="muted"))
-
-
-def code_block(value: str, language: str = "yaml") -> None:
-    console().print(
-        Syntax(
-            value,
-            language,
-            theme="ansi_dark",
-            background_color="default",
-            word_wrap=False,
-            line_numbers=False,
-        )
-    )
-
-
-def secret_value(value: str) -> None:
-    """Print an exact copyable value without Rich recording, markup or truncation."""
-    console().print(Text("Copy this value into the password field", style="accent"))
-    sys.stdout.write(value + "\n")
-    sys.stdout.flush()
-
-
 def success(message: str) -> None:
-    console().print(Text.assemble(("✓ ", "good"), (message, "bold")))
+    console().print(Text.assemble(("✓ ", "good"), _text(message, "bold")))
 
 
 def error(message: str) -> None:
-    console(stderr=True).print(Text.assemble(("✕ ", "bad"), (message, "")))
+    console(stderr=True).print(Text.assemble(("✕ ", "bad"), _text(message)))
 
 
 def result(operation: str, status: str, target: dict | None, data) -> None:
     screen = console()
     screen.print(
-        Text.assemble(("✓ ", "good"), (operation.title(), "bold"), (f"  {status}", "muted"))
+        Text.assemble(
+            ("✓ ", "good"), _text(operation.title(), "bold"), _text(f"  {status}", "muted")
+        )
     )
     if target:
         details([(key.title(), str(value)) for key, value in target.items() if value is not None])
@@ -135,9 +157,9 @@ def result(operation: str, status: str, target: dict | None, data) -> None:
         table.add_column("UID", style="muted", overflow="fold")
         for item in data:
             table.add_row(
-                Text(item["name"]),
-                state_label(item["state"]),
-                Text(item.get("uid", "")),
+                _text(item["name"]),
+                _text(state_label(item["state"])),
+                _text(item.get("uid", "")),
             )
         screen.print(table)
     elif isinstance(data, dict) and {"stopped", "pods", "state"} <= data.keys():
@@ -201,17 +223,3 @@ def preview(manifest: dict) -> None:
         )
     )
     details(rows, "Notebook preview", stderr=True)
-
-
-def session_header(cluster_id: str, editor_only: bool = False) -> None:
-    heading(cluster_id, "One authorized session. Remote Notebooks keep running when you leave.")
-    rows = [("Session", "status · reconnect · disconnect")]
-    if not editor_only:
-        rows = [
-            ("Inspect", "list · notebook status"),
-            ("Work", "create · shell · open"),
-            ("Manage", "start · stop · delete · retry · save-preset"),
-            *rows,
-        ]
-    details(rows)
-    note("Type a command, or press Tab to browse. Add --help to see its options.")
