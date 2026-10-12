@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import contextlib
+import functools
 import math
 import ssl
 from dataclasses import dataclass
@@ -10,13 +11,12 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-import aiohttp
 from pydantic import SecretStr
 
 from lab import clock
 from lab.credential import CredentialService, Grant
 from lab.errors import LabError
-from lab.transport import Relay, SSHForward
+from lab.transport import Dial, Relay, SSHForward
 
 
 class Connection(Protocol):
@@ -48,6 +48,8 @@ class Session:
 
     :param authorized_at: Suspend-inclusive authorization time; defaults to the current time.
     :param cluster_id: Stable operator-assigned cluster identity.
+    :param route: SSH forwarder owned by the caller and shared with other sessions; the
+        session starts and uses it but never closes it.
     """
 
     def __init__(
@@ -59,6 +61,7 @@ class Session:
         *,
         cluster_id: str,
         authorized_at: float | None = None,
+        route: SSHForward | None = None,
     ) -> None:
         authorized_at = clock.now() if authorized_at is None else authorized_at
         if not math.isfinite(authorized_at) or max_age_seconds <= 0:
@@ -94,12 +97,17 @@ class Session:
         self.endpoint = ""
         self._relay = Relay(self._permitted, self._confirm_failure)
         self._ssh: SSHForward | None = None
+        self._owns_ssh = route is None
         if transport.mode == "ssh":
             if tools.ssh is None or not transport.ssh_target:
                 raise LabError(
                     "SSH mode requires a configured target and a verified SSH executable."
                 )
-            self._ssh = SSHForward(tools.python, tools.ssh, transport.ssh_target, self.deadline)
+            if route is not None and route.target != transport.ssh_target:
+                raise LabError("The shared SSH route belongs to another target.")
+            self._ssh = route or SSHForward(
+                tools.python, tools.ssh, transport.ssh_target, self.deadline
+            )
         elif transport.mode != "direct":
             raise LabError("The configured transport mode is unsupported.")
         self._credentials = CredentialService(self, tools.credential)
@@ -157,19 +165,18 @@ class Session:
             async with asyncio.timeout(min(20.0, self.remaining)):
                 await self._relay.start()
                 self.endpoint = f"https://127.0.0.1:{self._relay.port}"
-                destination = self._destination
+                dial: Dial = functools.partial(asyncio.open_connection, *self._destination)
                 if self._ssh is not None:
-                    destination = await self._ssh.start(*destination)
-                await self._probe(destination)
+                    dial = await self._ssh.start(*self._destination)
+                await self._probe(dial)
                 if self.remaining <= 0:
                     raise LabError("The session expired while connecting.", code=3)
-                self._relay.destination = destination
+                self._relay.destination = dial
                 self.state = "connected"
         except BaseException as error:
             self.state = "disconnected"
             await self._relay.disconnect()
-            if self._ssh is not None:
-                await self._ssh.close()
+            await self._release_ssh()
             if isinstance(error, asyncio.CancelledError):
                 raise
             if isinstance(error, LabError):
@@ -178,24 +185,24 @@ class Session:
                 "The Kubernetes transport could not be established and verified."
             ) from None
 
-    async def _probe(self, destination: tuple[str, int]) -> None:
+    async def _probe(self, dial: Dial) -> None:
+        """Verify TLS to the configured identity through the route, then read one status."""
         if self._token is None or self.remaining <= 0:
             raise LabError("The session authorization has expired.", code=3)
-        host, port = destination
-        host = f"[{host}]" if ":" in host else host
-        timeout = aiohttp.ClientTimeout(total=max(0.001, min(5.0, self.remaining)))
-        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
-        async with (
-            aiohttp.ClientSession(connector=connector, timeout=timeout, trust_env=False) as client,
-            client.get(
-                f"https://{host}:{port}/version",
-                server_hostname=self.tls_name,
-                allow_redirects=False,
-            ) as response,
-        ):
-            if response.status not in (200, 401, 403):
-                raise LabError("The Kubernetes transport health check failed.")
-            # An authorization failure still proves the verified TLS route is reachable.
+        async with asyncio.timeout(max(0.001, min(5.0, self.remaining))):
+            reader, writer = await dial(ssl=self.ssl_context, server_hostname=self.tls_name)
+            try:
+                writer.write(
+                    f"GET /version HTTP/1.1\r\nHost: {self.tls_name}\r\n"
+                    "Connection: close\r\n\r\n".encode()
+                )
+                await writer.drain()
+                status = (await reader.readline()).split()
+            finally:
+                writer.transport.abort()
+        # An authorization failure still proves the verified TLS route is reachable.
+        if len(status) < 2 or status[1] not in (b"200", b"401", b"403"):
+            raise LabError("The Kubernetes transport health check failed.")
 
     async def check_health(self) -> None:
         """Confirm route health; disconnect the whole session only on confirmed failure."""
@@ -206,7 +213,7 @@ class Session:
             assert destination is not None
             try:
                 await self._probe(destination)
-            except (aiohttp.ClientError, OSError, TimeoutError, LabError):
+            except (OSError, TimeoutError, ValueError, LabError):
                 await self.disconnect()
                 raise LabError(
                     "The Kubernetes connection was lost. Use explicit Reconnect."
@@ -224,8 +231,11 @@ class Session:
                 return
             self.state = "disconnected"
             await self._relay.disconnect()
-            if self._ssh is not None:
-                await self._ssh.close()
+            await self._release_ssh()
+
+    async def _release_ssh(self) -> None:
+        if self._ssh is not None and self._owns_ssh:
+            await self._ssh.close()
 
     async def create_grant(self) -> Grant:
         """Create an independent token-free client configuration and secret capability."""
@@ -264,11 +274,9 @@ class Session:
             errors: list[BaseException] = []
             for operation in (
                 self._relay.close,
-                self._ssh.close if self._ssh else None,
+                self._release_ssh,
                 self._credentials.close,
             ):
-                if operation is None:
-                    continue
                 try:
                     await operation()
                 except (OSError, LabError) as error:

@@ -38,11 +38,33 @@ Each socket handler owns one request. Metadata requests read the index or select
 connection and profile. A kubectl request creates an ordinary `Session` and client
 grant, then keeps the socket open until its client exits. The caller runs kubectl
 locally with inherited standard streams, so terminals and pipes need no custom
-streaming protocol. Separate clients get separate cluster connections.
+streaming protocol. Separate clients get separate cluster connections, client
+grants and streams.
+
+In SSH mode those connections share one forwarder per cluster, owned by the
+authorization and bounded by its deadline. The SSH key is therefore used when the
+forwarder starts, not once per kubectl command, so an SSH agent that later locks
+or asks for confirmation does not interrupt an authorization that is still valid.
+If the forwarder exits, the next request restarts it, which uses the key again.
+Sharing never crosses authorizations: each `lab session start` owns its own
+forwarders and closes them at shutdown.
+
+A forwarder listens on a Unix socket in a private directory rather than a TCP
+port, so no other local user can use the route however long it lives. A restart
+binds the same path, so sessions that share the forwarder reach its replacement
+unchanged. Sessions see a route only as a function that opens a stream to the
+Kubernetes endpoint: a direct route opens TCP to the server, an SSH route opens the
+socket, and forwarding and health checks are the same for both. The supervisor
+runs in its own session, so a signal to the owner's process group (a closed
+terminal, a runner timeout) ends only the owner, whose exit the supervisor observes
+before closing SSH. kubectl itself connects only over TCP, so each session's relay
+still listens on a loopback port while its client runs.
 
 The owner preserves one absolute deadline, the requested duration capped by the
 index maximum, across every connection. It also ends when its parent process
-exits, which binds authorization to the agent or terminal that requested it. An
+exits, which binds authorization to the agent or terminal that requested it.
+The parent is recorded before approval is awaited, so a requester that exits
+while waiting is refused rather than replaced by whichever process adopts lab. An
 optional cluster list hides every other indexed cluster from listing, inspection
 and connection. Shutdown stops
 new requests, drains connection cleanup, then acknowledges closure and removes

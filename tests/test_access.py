@@ -30,7 +30,7 @@ async def authorization(tmp_path, monkeypatch):
     secrets = SimpleNamespace(read=AsyncMock(side_effect=documents.__getitem__))
     bootstrap = {"index_ref": index_ref, "profiles_dir": str(profiles_dir(tmp_path))}
     owner = access.Authorization(
-        secrets, bootstrap, index, instant[0], index.session.max_age_seconds
+        secrets, bootstrap, index, instant[0], index.session.max_age_seconds, parent=os.getppid()
     )
     state = SimpleNamespace(
         owner=owner,
@@ -50,8 +50,11 @@ async def authorization(tmp_path, monkeypatch):
     )
 
     class LocalSession:
-        def __init__(self, connection, transport, max_age, tools, *, cluster_id, authorized_at):
+        def __init__(
+            self, connection, transport, max_age, tools, *, cluster_id, authorized_at, route
+        ):
             self.cluster_id = cluster_id
+            self.route = route
             self.deadline = authorized_at + max_age
             self.path = tmp_path / f"grant-{len(state.sessions)}"
             self.environment = {"LAB_TEST_GRANT": self.path.name}
@@ -177,15 +180,73 @@ async def test_missing_profile_does_not_block_fresh_connections_to_multiple_clus
 async def test_requested_duration_and_clusters_bound_the_authorization(authorization):
     state = authorization
     owner = access.Authorization(
-        SimpleNamespace(), {"index_ref": "", "profiles_dir": ""}, state.index, 0, 60
+        SimpleNamespace(),
+        {"index_ref": "", "profiles_dir": ""},
+        state.index,
+        0,
+        60,
+        parent=os.getppid(),
     )
     assert owner.deadline == 60
     with pytest.raises(LabError, match="not registered: missing"):
-        access.Authorization(SimpleNamespace(), {}, state.index, 0, 60, ("missing",))
+        access.Authorization(
+            SimpleNamespace(), {}, state.index, 0, 60, ("missing",), parent=os.getppid()
+        )
     state.owner.clusters = ("second",)
     assert await access.request(state.identity, "list") == {"clusters": [{"id": "second"}]}
     with pytest.raises(LabError, match="not available in this session"):
         await access.request(state.identity, "inspect", CLUSTER_ID)
+
+
+async def test_ssh_sessions_share_one_forwarder_per_cluster_until_shutdown(
+    authorization, monkeypatch
+):
+    state = authorization
+    forwarders = []
+
+    class Forwarder:
+        def __init__(self, python, ssh, target, deadline):
+            self.target = target
+            self.deadline = deadline
+            self.closed = 0
+            forwarders.append(self)
+
+        async def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(access, "SSHForward", Forwarder)
+    access.Toolchain.load().ssh = Path("/protected/ssh")
+    routed = cluster_data()
+    routed["transport"] = {"mode": "ssh", "ssh_target": "synthetic-target"}
+    index_document = state.secrets.read.side_effect
+    state.secrets.read.side_effect = lambda ref: (
+        index_document(ref) if ref == state.owner.index_ref else yaml.safe_dump(routed)
+    )
+    for cluster in (CLUSTER_ID, CLUSTER_ID, "second"):
+        reader, writer = await lease(state.identity, cluster)
+        assert "data" in await response(reader)
+        await disconnect(writer)
+    first, again, other = (session.route for session in state.sessions)
+    assert first is again and first is not other
+    assert len(forwarders) == 2
+    assert {forwarder.deadline for forwarder in forwarders} == {state.owner.deadline}
+    assert [forwarder.closed for forwarder in forwarders] == [0, 0]
+    state.owner.stopping.set()
+    await asyncio.wait_for(state.task, 2)
+    assert [forwarder.closed for forwarder in forwarders] == [1, 1]
+
+
+def test_authorization_refuses_a_requester_that_exited_before_approval(authorization):
+    state = authorization
+    with pytest.raises(LabError, match="requesting process exited"):
+        access.Authorization(
+            SimpleNamespace(),
+            {"index_ref": "", "profiles_dir": ""},
+            state.index,
+            0,
+            60,
+            parent=os.getppid() + 1,
+        )
 
 
 async def test_authorization_ends_when_its_requesting_process_exits(authorization, monkeypatch):

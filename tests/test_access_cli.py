@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -25,7 +26,10 @@ async def test_start_authorizes_without_a_cluster_or_notebook_history(monkeypatc
     class Owner:
         reason = "explicit close"
 
-        def __init__(self, secrets, configuration, index, authorized_at, duration, clusters):
+        def __init__(
+            self, secrets, configuration, index, authorized_at, duration, clusters, *, parent
+        ):
+            assert parent == os.getppid()
             assert secrets is source
             assert configuration == bootstrap
             assert index.clusters

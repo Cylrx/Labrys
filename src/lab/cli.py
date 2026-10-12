@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -673,6 +674,8 @@ async def run_access(args) -> dict | int | None:
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
         if args.command == "session" and args.action == "start":
+            # Recorded before approval is awaited, so the binding names the requester.
+            parent = os.getppid()
             bootstrap = read_bootstrap(Paths())
             if bootstrap is None:
                 raise LabError("Run 'lab init' to configure this device first.", 4)
@@ -692,6 +695,7 @@ async def run_access(args) -> dict | int | None:
                 authorized_at,
                 auth.duration(args.duration),
                 tuple(args.clusters),
+                parent=parent,
             )
 
             def ready(data):

@@ -23,6 +23,7 @@ from lab.resources import load_resources
 from lab.secrets import Secrets
 from lab.session import Session, Tools
 from lab.tools import Toolchain
+from lab.transport import SSHForward
 
 FRAME_LIMIT = 4 * 1024 * 1024
 
@@ -82,9 +83,12 @@ class Authorization:
 
     Each connected client owns its operation and its cleanup. A kubectl client
     holds its socket open for as long as it uses the associated cluster Session.
+    Sessions to an SSH-routed cluster share one forwarder owned by this authorization,
+    so the SSH key is used when the forwarder starts rather than once per client.
 
     :param duration: Requested lifetime in seconds, capped by the index maximum.
     :param clusters: Allowed cluster IDs; empty allows every indexed cluster.
+    :param parent: PID of the requesting process, recorded before approval was awaited.
     """
 
     def __init__(
@@ -95,6 +99,8 @@ class Authorization:
         authorized_at: float,
         duration: int,
         clusters: tuple[str, ...] = (),
+        *,
+        parent: int,
     ):
         if unknown := set(clusters) - {entry.id for entry in index.clusters}:
             raise LabError(f"Cluster is not registered: {', '.join(sorted(unknown))}.", 4)
@@ -106,10 +112,13 @@ class Authorization:
         self.lifetime = min(duration, index.session.max_age_seconds)
         self.deadline = authorized_at + self.lifetime
         secrets.deadline = self.deadline
-        # The requesting process is the parent; reparenting means it exited.
-        self.parent = os.getppid()
+        # Authorization binds to the process that requested it; reparenting means it exited.
+        if os.getppid() != parent:
+            raise LabError("The requesting process exited. Start a new session.", 3)
+        self.parent = parent
         self.clients: set[asyncio.Task] = set()
         self.closers: set[asyncio.Task] = set()
+        self.routes: dict[tuple[str, str], SSHForward] = {}
         self.stopping = asyncio.Event()
         self.closed = asyncio.Event()
         self.reason = "explicit close"
@@ -150,6 +159,15 @@ class Authorization:
             result["profile_error"] = str(error)
         return result
 
+    def _route(self, cluster, tools) -> SSHForward | None:
+        target = cluster.transport.ssh_target
+        if cluster.transport.mode != "ssh" or tools.ssh is None or not target:
+            return None
+        key = (cluster.cluster_id, target)
+        if key not in self.routes:
+            self.routes[key] = SSHForward(tools.python, tools.ssh, target, self.deadline)
+        return self.routes[key]
+
     @contextlib.asynccontextmanager
     async def _connection(self, cluster, tools):
         connection = Session(
@@ -159,6 +177,7 @@ class Authorization:
             Tools(tools.ssh, tools.python, tools.credential),
             cluster_id=cluster.cluster_id,
             authorized_at=self.authorized_at,
+            route=self._route(cluster, tools),
         )
         try:
             await connection.connect()
@@ -333,6 +352,13 @@ class Authorization:
                 for task in running:
                     task.cancel()
                 await asyncio.gather(*running, return_exceptions=True)
+                for route in self.routes.values():
+                    try:
+                        await route.close()
+                    except LabError:
+                        self.cleanup_error = LabError(
+                            "Local connection cleanup could not be fully confirmed.", 8
+                        )
                 self.secrets = None
                 self.closed.set()
                 await asyncio.gather(*self.closers, return_exceptions=True)

@@ -21,7 +21,7 @@ def main() -> int:
     parser.add_argument("--target", required=True)
     parser.add_argument("--host", required=True)
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--local-port", type=int, required=True)
+    parser.add_argument("--local-socket", required=True)
     args = parser.parse_args()
     host = f"[{args.host}]" if ":" in args.host else args.host
     command = [
@@ -48,8 +48,12 @@ def main() -> int:
         "PermitLocalCommand=no",
         "-o",
         "Tunnel=no",
+        "-o",
+        "StreamLocalBindMask=0177",
+        "-o",
+        "StreamLocalBindUnlink=yes",
         "-L",
-        f"127.0.0.1:{args.local_port}:{host}:{args.port}",
+        f"{args.local_socket}:{host}:{args.port}",
         "--",
         args.target,
     ]

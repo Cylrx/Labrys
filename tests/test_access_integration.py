@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 import shutil
 import ssl
 from pathlib import Path
@@ -42,6 +43,7 @@ async def authorization_api(api, tmp_path):
         index,
         clock.now(),
         index.session.max_age_seconds,
+        parent=os.getppid(),
     )
     ready = asyncio.get_running_loop().create_future()
     serving = asyncio.create_task(owner.serve(ready.set_result))

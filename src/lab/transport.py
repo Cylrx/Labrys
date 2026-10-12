@@ -1,12 +1,17 @@
-"""Owned raw TCP routes with a stable, explicitly enabled loopback listener."""
+"""Owned raw routes to the Kubernetes endpoint behind a stable, explicitly enabled listener."""
 
 import asyncio
+import contextlib
+import functools
 import os
-import socket
+import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from lab.errors import LabError
+
+# Opens one stream to the Kubernetes endpoint; keyword arguments are asyncio's TLS options.
+Dial = Callable[..., Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
 class Relay:
@@ -20,7 +25,7 @@ class Relay:
         self._server: asyncio.Server | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._writers: set[asyncio.StreamWriter] = set()
-        self.destination: tuple[str, int] | None = None
+        self.destination: Dial | None = None
         self.port = 0
 
     async def start(self) -> None:
@@ -39,9 +44,7 @@ class Relay:
         upstream: asyncio.StreamWriter | None = None
         try:
             try:
-                upstream_reader, upstream = await asyncio.wait_for(
-                    asyncio.open_connection(*self.destination), 5
-                )
+                upstream_reader, upstream = await asyncio.wait_for(self.destination(), 5)
             except (OSError, TimeoutError):
                 await self._failure()
                 return
@@ -99,7 +102,13 @@ class Relay:
 
 
 class SSHForward:
-    """Own one SSH forwarder through a parent-liveness supervisor."""
+    """Own one SSH forwarder through a parent-liveness supervisor.
+
+    SSH listens on a Unix socket in a private directory, so only this user can use the
+    route. Starting a live forwarder for the same destination returns the same route, so
+    the SSH key is used once per forwarder rather than once per client that shares it; a
+    restart keeps the socket path, so sharers reach the new forwarder unchanged.
+    """
 
     def __init__(self, python: Path, ssh: Path, target: str, deadline: float) -> None:
         self.python = python
@@ -108,69 +117,89 @@ class SSHForward:
         self.deadline = deadline
         self.process: asyncio.subprocess.Process | None = None
         self._liveness: int | None = None
-        self.port = 0
+        self._destination: tuple[str, int] | None = None
+        self._starting = asyncio.Lock()
+        self._directory: Path | None = None
 
     @property
     def alive(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
-    async def start(self, host: str, port: int) -> tuple[str, int]:
-        for _ in range(3):
-            with socket.socket() as reservation:
-                reservation.bind(("127.0.0.1", 0))
-                self.port = reservation.getsockname()[1]
-            read_fd, self._liveness = os.pipe()
-            os.set_inheritable(self._liveness, False)
+    async def start(self, host: str, port: int) -> Dial:
+        async with self._starting:
+            if self._directory is None:
+                self._directory = Path(tempfile.mkdtemp(prefix="lab-ssh-", dir="/tmp"))
+            path = self._directory / "socket"
+            if not (self.alive and self._destination == (host, port)):
+                await self._stop()
+                await self._start(host, port, path)
+                self._destination = (host, port)
+            return functools.partial(asyncio.open_unix_connection, str(path))
+
+    async def _start(self, host: str, port: int, path: Path) -> None:
+        read_fd, self._liveness = os.pipe()
+        os.set_inheritable(self._liveness, False)
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                str(self.python),
+                "-I",
+                "-m",
+                "lab.supervisor",
+                "--parent-fd",
+                str(read_fd),
+                "--deadline",
+                str(self.deadline),
+                "--ssh",
+                str(self.ssh),
+                "--target",
+                self.target,
+                "--host",
+                host,
+                "--port",
+                str(port),
+                "--local-socket",
+                str(path),
+                pass_fds=(read_fd,),
+                # Signals sent to the owner's process group must not kill the
+                # supervisor before it closes SSH; the owner's exit reaches it as EOF.
+                start_new_session=True,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+                env=_ssh_environment(),
+            )
+        except OSError:
+            await self._stop()
+            raise LabError("The owned SSH transport could not start.") from None
+        finally:
+            os.close(read_fd)
+        # ExitOnForwardFailure resolves actual bind failures; the probe is only readiness.
+        for _ in range(50):
+            if not self.alive:
+                break
             try:
-                self.process = await asyncio.create_subprocess_exec(
-                    str(self.python),
-                    "-I",
-                    "-m",
-                    "lab.supervisor",
-                    "--parent-fd",
-                    str(read_fd),
-                    "--deadline",
-                    str(self.deadline),
-                    "--ssh",
-                    str(self.ssh),
-                    "--target",
-                    self.target,
-                    "--host",
-                    host,
-                    "--port",
-                    str(port),
-                    "--local-port",
-                    str(self.port),
-                    pass_fds=(read_fd,),
-                    stdin=asyncio.subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
-                    env=_ssh_environment(),
-                )
-            except OSError:
-                await self.close()
-                raise LabError("The owned SSH transport could not start.") from None
-            finally:
-                os.close(read_fd)
-            # ExitOnForwardFailure resolves actual bind failures; the probe is only readiness.
-            for _ in range(50):
-                if not self.alive:
-                    break
-                try:
-                    _, writer = await asyncio.wait_for(
-                        asyncio.open_connection("127.0.0.1", self.port), 0.1
-                    )
-                    writer.close()
-                    await writer.wait_closed()
-                    if self.alive:
-                        return "127.0.0.1", self.port
-                except (OSError, TimeoutError):
-                    pass
-                await asyncio.sleep(0.1)
-            await self.close()
+                _, writer = await asyncio.wait_for(asyncio.open_unix_connection(str(path)), 0.1)
+                writer.close()
+                await writer.wait_closed()
+                if self.alive:
+                    return
+            except (OSError, TimeoutError):
+                pass
+            await asyncio.sleep(0.1)
+        await self._stop()
         raise LabError("SSH forwarding failed. Check the configured SSH target and reachability.")
 
     async def close(self) -> None:
+        """Stop SSH and remove the private socket directory."""
+        await self._stop()
+        if self._directory is not None:
+            with contextlib.suppress(FileNotFoundError):
+                (self._directory / "socket").unlink()
+            self._directory.rmdir()
+            self._directory = None
+
+    async def _stop(self) -> None:
+        self._destination = None
         if self._liveness is not None:
             os.close(self._liveness)
             self._liveness = None
