@@ -37,7 +37,11 @@ async def authorization_api(api, tmp_path):
     documents = {index_ref: index_text, index.clusters[0].config_ref: yaml.safe_dump(document)}
     secrets = SimpleNamespace(read=AsyncMock(side_effect=documents.__getitem__))
     owner = access.Authorization(
-        secrets, {"index_ref": index_ref, "profiles_dir": str(tmp_path)}, index, clock.now()
+        secrets,
+        {"index_ref": index_ref, "profiles_dir": str(tmp_path)},
+        index,
+        clock.now(),
+        index.session.max_age_seconds,
     )
     ready = asyncio.get_running_loop().create_future()
     serving = asyncio.create_task(owner.serve(ready.set_result))

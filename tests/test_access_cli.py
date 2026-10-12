@@ -25,18 +25,32 @@ async def test_start_authorizes_without_a_cluster_or_notebook_history(monkeypatc
     class Owner:
         reason = "explicit close"
 
-        def __init__(self, secrets, configuration, index, authorized_at):
+        def __init__(self, secrets, configuration, index, authorized_at, duration, clusters):
             assert secrets is source
             assert configuration == bootstrap
             assert index.clusters
+            assert (duration, clusters) == (6 * 3600, ("research",))
 
         async def serve(self, ready):
-            ready({"session": "lab-session-example", "idle_timeout": 900})
+            ready({"session": "lab-session-example", "expires_in": 6 * 3600})
 
     monkeypatch.setattr(cli.access, "Authorization", Owner)
-    args = cli.parser().parse_args(["session", "start", "--request-auth", "--json"])
+    args = cli.parser().parse_args(
+        [
+            "session",
+            "start",
+            "--request-auth",
+            "--json",
+            "--duration",
+            "6h",
+            "--cluster",
+            "research",
+        ]
+    )
     assert await cli.run(args) is None
-    request_token.assert_awaited_once_with({"command": "session", "action": "start"})
+    request_token.assert_awaited_once_with(
+        {"command": "session", "action": "start", "duration": "6h", "clusters": ["research"]}
+    )
     authenticate.assert_awaited_once_with("synthetic-service-token")
     source.read.assert_awaited_once_with(bootstrap["index_ref"])
     output = capsys.readouterr()
@@ -72,9 +86,11 @@ def test_native_exit_status_and_remote_json_option_are_not_reinterpreted(monkeyp
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--token-stdin", "session", "start", "--request-auth"],
+        ["--token-stdin", "session", "start", "--request-auth", "--duration", "1h"],
+        ["session", "start", "--duration", "90s"],
+        ["session", "start", "--duration", "1h", "--cluster", "Invalid_ID"],
         ["--request-auth", "session", "close", "lab-session-example"],
-        ["--yes", "session", "start"],
+        ["--yes", "session", "start", "--duration", "1h"],
         ["kubectl", "--session", "lab-session-example", "--cluster", "research", "get", "pods"],
         [
             "--json",
@@ -122,7 +138,7 @@ index = "schema_version: 1\\ndata_key_ref: op://fixture/key/password\\nclusters:
 cli.Secrets.authenticate = AsyncMock(
     return_value=SimpleNamespace(read=AsyncMock(return_value=index))
 )
-sys.argv = ["lab", "session", "start", "--token-stdin", "--json"]
+sys.argv = ["lab", "session", "start", "--token-stdin", "--json", "--duration", "1h"]
 cli.main()
 """
     process = await asyncio.create_subprocess_exec(
@@ -164,7 +180,7 @@ async def read_token(from_stdin):
     print("WAITING_FOR_TOKEN", file=sys.stderr, flush=True)
     return await original(from_stdin)
 cli.read_token = read_token
-sys.argv = ["lab", "session", "start", "--token-stdin", "--json"]
+sys.argv = ["lab", "session", "start", "--token-stdin", "--json", "--duration", "1h"]
 cli.main()
 """
     process = await asyncio.create_subprocess_exec(

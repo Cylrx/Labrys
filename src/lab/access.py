@@ -24,7 +24,6 @@ from lab.secrets import Secrets
 from lab.session import Session, Tools
 from lab.tools import Toolchain
 
-IDLE_TIMEOUT = 900
 FRAME_LIMIT = 4 * 1024 * 1024
 
 
@@ -79,21 +78,36 @@ async def _receive(reader: asyncio.StreamReader) -> dict:
 
 
 class Authorization:
-    """Keep 1Password access in one foreground process until close or expiry.
+    """Keep 1Password access in one foreground process until close, expiry or orphaning.
 
     Each connected client owns its operation and its cleanup. A kubectl client
     holds its socket open for as long as it uses the associated cluster Session.
+
+    :param duration: Requested lifetime in seconds, capped by the index maximum.
+    :param clusters: Allowed cluster IDs; empty allows every indexed cluster.
     """
 
-    def __init__(self, secrets: Secrets, bootstrap: dict, index: Index, authorized_at: float):
+    def __init__(
+        self,
+        secrets: Secrets,
+        bootstrap: dict,
+        index: Index,
+        authorized_at: float,
+        duration: int,
+        clusters: tuple[str, ...] = (),
+    ):
+        if unknown := set(clusters) - {entry.id for entry in index.clusters}:
+            raise LabError(f"Cluster is not registered: {', '.join(sorted(unknown))}.", 4)
         self.secrets: Secrets | None = secrets
         self.index_ref = bootstrap["index_ref"]
         self.profiles_dir = Path(bootstrap["profiles_dir"])
+        self.clusters = clusters
         self.authorized_at = authorized_at
-        self.max_age = index.session.max_age_seconds
-        self.deadline = authorized_at + self.max_age
+        self.lifetime = min(duration, index.session.max_age_seconds)
+        self.deadline = authorized_at + self.lifetime
         secrets.deadline = self.deadline
-        self.idle_since = clock.now()
+        # The requesting process is the parent; reparenting means it exited.
+        self.parent = os.getppid()
         self.clients: set[asyncio.Task] = set()
         self.closers: set[asyncio.Task] = set()
         self.stopping = asyncio.Event()
@@ -105,16 +119,19 @@ class Authorization:
         if self.stopping.is_set() or clock.now() >= self.deadline:
             raise LabError("Authorization session ended. Start a new session.", 3)
 
-    async def _index(self) -> Index:
+    async def _entries(self):
         self._check()
         assert self.secrets is not None
-        return parse_index(await self.secrets.read(self.index_ref))
+        index = parse_index(await self.secrets.read(self.index_ref))
+        return [entry for entry in index.clusters if not self.clusters or entry.id in self.clusters]
 
     async def _cluster(self, identity: str):
-        index = await self._index()
-        entry = next((entry for entry in index.clusters if entry.id == identity), None)
+        entry = next((entry for entry in await self._entries() if entry.id == identity), None)
         if entry is None:
-            raise LabError("Cluster is not registered. Use lab cluster list with this session.", 4)
+            raise LabError(
+                "Cluster is not available in this session. Use lab cluster list with this session.",
+                4,
+            )
         assert self.secrets is not None
         return parse_cluster(await self.secrets.read(entry.config_ref), identity)
 
@@ -138,7 +155,7 @@ class Authorization:
         connection = Session(
             cluster.connection,
             cluster.transport,
-            self.max_age,
+            self.lifetime,
             Tools(tools.ssh, tools.python, tools.credential),
             cluster_id=cluster.cluster_id,
             authorized_at=self.authorized_at,
@@ -253,8 +270,7 @@ class Authorization:
                     raise self.cleanup_error
                 data = {"status": "Closed"}
             elif operation == "list":
-                index = await self._index()
-                data = {"clusters": [{"id": entry.id} for entry in index.clusters]}
+                data = {"clusters": [{"id": entry.id} for entry in await self._entries()]}
             elif operation == "inspect":
                 data = await self._inspect(request["cluster"])
             elif operation == "resources":
@@ -279,17 +295,14 @@ class Authorization:
                 await writer.wait_closed()
             self.clients.discard(task)
             self.closers.discard(task)
-            if not self.clients:
-                self.idle_since = clock.now()
 
     async def _watch(self) -> None:
         while not self.stopping.is_set():
-            now = clock.now()
-            if now >= self.deadline:
+            if clock.now() >= self.deadline:
                 self.reason = "authorization expired"
                 self.stopping.set()
-            elif not self.clients and now - self.idle_since >= IDLE_TIMEOUT:
-                self.reason = "idle timeout"
+            elif os.getppid() != self.parent:
+                self.reason = "requesting process exited"
                 self.stopping.set()
             else:
                 await asyncio.sleep(0.2)
@@ -308,7 +321,6 @@ class Authorization:
                     {
                         "session": identity,
                         "expires_in": max(0, self.deadline - clock.now()),
-                        "idle_timeout": IDLE_TIMEOUT,
                     }
                 )
                 await self.stopping.wait()

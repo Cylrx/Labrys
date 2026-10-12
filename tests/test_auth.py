@@ -145,6 +145,7 @@ def test_protocol_duplicate_keys_and_nonfinite_values_refused():
         "version": 1,
         "id": "1" * 32,
         "expires": time.time() + 60,
+        "requester": {"pid": 1, "name": "fixture"},
         "action": {**ACTION, "timeout": float("nan")},
     }
     with pytest.raises(LabError):
@@ -265,14 +266,18 @@ async def test_byte_identical_replacement_is_rejected_before_prompt(monkeypatch,
 async def test_reusable_session_handoff_displays_its_scope_without_exposing_token(
     monkeypatch, tmp_path, capsys
 ):
-    args = cli.parser().parse_args(["session", "start", "--request-auth", "--json"])
+    args = cli.parser().parse_args(
+        ["session", "start", "--request-auth", "--json", "--duration", "6h"]
+    )
     cli.validate_arguments(args)
     task, path = await pending(monkeypatch, tmp_path, action=auth.description(args))
     monkeypatch.setattr(auth, "hidden_token", lambda deadline: SECRET)
     await asyncio.to_thread(auth.send_token, str(path))
     assert await task == SECRET
     output = capsys.readouterr()
-    assert "Authorize reusable lab access" in output.err
-    assert "indexed clusters" in output.err
+    assert "Authorize reusable access" in output.err
+    assert "All indexed clusters" in output.err
+    assert "6h (until " in output.err
+    assert f"(pid {os.getppid()})" in output.err
     assert SECRET not in output.out + output.err
     assert not path.parent.exists()

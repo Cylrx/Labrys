@@ -53,7 +53,8 @@ use your existing SSH host configuration.
 After updating the checkout, run `uv tool install --python 3.12 --force .` to
 replace the installed version.
 
-For an agent or repeated CLI work, start with `lab session start --request-auth`.
+For an agent or repeated CLI work, start with
+`lab session start --request-auth --duration 4h`, using a duration you choose.
 One authorization supports cluster discovery, resource snapshots and native kubectl access; follow
 the [agent workflow](docs/manual.md#ai-agents-and-automation).
 

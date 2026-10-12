@@ -6,6 +6,7 @@ import ctypes
 import json
 import math
 import os
+import re
 import select
 import shlex
 import socket
@@ -17,6 +18,7 @@ import termios
 import time
 from pathlib import Path
 
+from lab import presentation
 from lab.errors import LabError
 
 LIFETIME = 300
@@ -71,10 +73,38 @@ def _decode(raw):
         raise _error("Invalid authentication protocol frame.") from None
 
 
+def duration(text: str) -> int:
+    """Convert a duration such as ``90m``, ``6h`` or ``2d`` to seconds.
+
+    :raises ValueError: If the text is not a positive count with an m, h or d unit.
+    """
+    match = re.fullmatch(r"([1-9][0-9]{0,3})([mhd])", text)
+    if match is None:
+        raise ValueError(text)
+    return int(match[1]) * {"m": 60, "h": 3600, "d": 86400}[match[2]]
+
+
+def _process_name(pid: int) -> str:
+    if sys.platform == "darwin":
+        name = ctypes.create_string_buffer(256)
+        if ctypes.CDLL(None).proc_name(pid, name, len(name)) > 0:
+            return name.value.decode(errors="replace")
+        return "unknown"
+    try:
+        return Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return "unknown"
+
+
 def description(args):
     """Describe parsed options without a token or an executable command payload."""
     if args.command == "session" and args.action == "start":
-        return {"command": "session", "action": "start"}
+        return {
+            "command": "session",
+            "action": "start",
+            "duration": args.duration,
+            "clusters": args.clusters,
+        }
     return {
         key: value
         for key, value in vars(args).items()
@@ -83,7 +113,17 @@ def description(args):
 
 
 def _validate_manifest(value):
-    if set(value) != {"version", "id", "expires", "action"}:
+    if set(value) != {"version", "id", "expires", "requester", "action"}:
+        raise _error()
+    requester = value["requester"]
+    if (
+        not isinstance(requester, dict)
+        or set(requester) != {"pid", "name"}
+        or type(requester["pid"]) is not int
+        or requester["pid"] <= 0
+        or not isinstance(requester["name"], str)
+        or len(requester["name"]) > 256
+    ):
         raise _error()
     if (
         type(value["version"]) is not int
@@ -99,7 +139,19 @@ def _validate_manifest(value):
     if not 0 < expiry - time.time() <= LIFETIME + 2:
         raise _error()
     action = value["action"]
-    if action == {"command": "session", "action": "start"}:
+    if isinstance(action, dict) and action.get("command") == "session":
+        if (
+            set(action) != {"command", "action", "duration", "clusters"}
+            or action["action"] != "start"
+            or not isinstance(action["duration"], str)
+            or not isinstance(action["clusters"], list)
+            or not all(isinstance(cluster, str) for cluster in action["clusters"])
+        ):
+            raise _error()
+        try:
+            duration(action["duration"])
+        except ValueError:
+            raise _error() from None
         return value
     if not isinstance(action, dict) or action.get("command") != "notebook":
         raise _error()
@@ -211,6 +263,7 @@ async def request_token(action: dict, *, lifetime: float = LIFETIME) -> str:
             "version": 1,
             "id": os.urandom(16).hex(),
             "expires": time.time() + lifetime,
+            "requester": {"pid": os.getppid(), "name": _process_name(os.getppid())},
             "action": action,
         }
         path = directory / "request.json"
@@ -353,42 +406,42 @@ def hidden_token(deadline: float) -> str:
         os.close(fd)
 
 
-def show_request(action: dict) -> None:
-    """Render only the intended operation and material options as escaped plain text."""
-    reusable = action.get("command") == "session"
-    print(
-        "Authorize reusable lab access" if reusable else "Authorize independent lab access",
-        file=sys.stderr,
+def show_request(manifest: dict) -> None:
+    """Render the requester and the material options of a request on stderr."""
+    action, requester = manifest["action"], manifest["requester"]
+    rows = [("Requested by", f"{requester['name']} (pid {requester['pid']})")]
+    if action["command"] == "session":
+        presentation.heading(
+            "Authorize reusable access",
+            "Discover clusters and run kubectl with their existing permissions.",
+            stderr=True,
+        )
+        until = time.localtime(time.time() + duration(action["duration"]))
+        rows += [
+            ("Clusters", ", ".join(action["clusters"]) or "All indexed clusters"),
+            ("Duration", f"{action['duration']} (until {time.strftime('%a %d %b %H:%M', until)})"),
+        ]
+    else:
+        presentation.heading("Authorize Notebook access", stderr=True)
+        labels = {
+            "action": "Notebook action",
+            "name": "Notebook",
+            "operation_id": "Operation",
+            "helper_python": "Helper interpreter",
+        }
+        rows += [
+            (labels.get(key, key.replace("_", " ").capitalize()), str(value))
+            for key, value in action.items()
+            if key not in {"command", "json", "wait", "yes"}
+        ]
+        if action.get("yes"):
+            rows.append(("Confirmation", "Accept the requested operation without another prompt"))
+    presentation.details(rows, stderr=True)
+    presentation.note(
+        "Type the Service Account Token to approve, or press Ctrl-C to deny. "
+        "The token goes once to the waiting process and is never saved.",
+        stderr=True,
     )
-    if reusable:
-        print(
-            "  Scope: discover indexed clusters and run kubectl with their existing permissions.\n"
-            "  Authorization remains available until explicit close or the session timeout.",
-            file=sys.stderr,
-        )
-    labels = {
-        "action": "Session action" if reusable else "Notebook action",
-        "cluster": "Cluster",
-        "namespace": "Namespace",
-        "name": "Notebook",
-        "pod": "Pod",
-        "container": "Container",
-        "operation_id": "Operation",
-        "helper_python": "Helper interpreter",
-    }
-    for key, value in action.items():
-        if key in {"command", "json", "wait", "yes"}:
-            continue
-        print(
-            f"  {labels.get(key, key.replace('_', ' ').capitalize())}: "
-            f"{json.dumps(value, ensure_ascii=True)}",
-            file=sys.stderr,
-        )
-    if action.get("yes"):
-        print(
-            "  Confirmation: accept the requested operation without another prompt", file=sys.stderr
-        )
-    print("The token goes once to the waiting process and is never saved.", file=sys.stderr)
 
 
 def send_token(request: str) -> None:
@@ -410,7 +463,7 @@ def send_token(request: str) -> None:
                 "request": manifest,
             }:
                 raise _error()
-            show_request(manifest["action"])
+            show_request(manifest)
             token = hidden_token(deadline)
             if time.monotonic() >= deadline or _request(path) != (manifest, identities):
                 raise _error()

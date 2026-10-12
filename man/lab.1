@@ -11,7 +11,7 @@ terminal
 lab [\-\-cluster CLUSTER]
 lab init
 lab cluster add|remove [\-\-cluster\-id CLUSTER]
-lab session start [\-\-request\-auth | \-\-token\-stdin] [\-\-json]
+lab session start \-\-duration DURATION [\-\-cluster CLUSTER ...] [\-\-request\-auth | \-\-token\-stdin] [\-\-json]
 lab session close SESSION [\-\-json]
 lab cluster list \-\-session SESSION [\-\-json]
 lab cluster inspect CLUSTER \-\-session SESSION [\-\-json]
@@ -175,28 +175,43 @@ Native kubectl keeps the cluster\(cqs existing permissions; lab does not
 restrict its verbs or apply Notebook creation profiles to raw Kubernetes
 requests.
 .PP
-Start one authorization process and keep it running:
+Before starting, ask the user how long the authorization should last and
+which clusters it needs.
+Do not choose either yourself.
+Then start one authorization process with their answers and keep it
+running:
 .IP
 .EX
-lab session start \-\-request\-auth \-\-json
+lab session start \-\-request\-auth \-\-json \-\-duration 4h \-\-cluster research\-example
 .EE
 .PP
+\f[CR]\-\-duration\f[R] is required and takes a count with an
+\f[CR]m\f[R], \f[CR]h\f[R] or \f[CR]d\f[R] unit.
+Repeat \f[CR]\-\-cluster\f[R] to allow several clusters; omit it to
+allow every indexed cluster.
 lab prints an authorization command to stderr and waits up to five
 minutes.
 Show that command to the user unchanged.
-They run it in their own terminal, review the scope and enter their
-Service Account Token in a hidden prompt.
+They run it in their own terminal, review the requesting process,
+clusters and duration, and approve by entering their Service Account
+Token in a hidden prompt.
 The token goes directly to lab through a private socket; do not request
 it in chat or tool output.
 .PP
 After successful authorization, stdout contains a \f[CR]Ready\f[R] JSON
-result with \f[CR]data.session\f[R], \f[CR]data.expires_in\f[R] and
-\f[CR]data.idle_timeout\f[R].
-Keep the process alive; a command runner\(cqs short timeout would end
-the authorization.
+result with \f[CR]data.session\f[R] and \f[CR]data.expires_in\f[R], in
+seconds.
+\f[CR]expires_in\f[R] is shorter than the requested duration when the
+index sets a lower maximum.
 The session ID identifies a local, same\-user socket, not a token.
 In the following examples, replace \f[CR]lab\-session\-example\f[R] with
 the returned ID.
+.PP
+Authorization ends when the process that started
+\f[CR]lab session start\f[R] exits.
+Run it as a background process of your own command runner; do not detach
+it with \f[CR]nohup\f[R], \f[CR]setsid\f[R] or \f[CR]&\f[R] from a shell
+that then exits, and do not give it a short command timeout.
 .PP
 Discover registered clusters before selecting one:
 .IP
@@ -274,7 +289,7 @@ lab kubectl \-\-session lab\-session\-example \-\-cluster research\-example \-\-
 Keep that command running and send later input to the same terminal.
 Its working directory and shell variables persist.
 Open another client for concurrent work.
-The same authorization can serve other indexed clusters; each client
+The same authorization can serve its other allowed clusters; each client
 establishes its own connection.
 Standard input, stdout, stderr and kubectl\(cqs exit code pass through
 unchanged, so pipes and native \f[CR]\-o json\f[R] work normally.
@@ -296,13 +311,9 @@ disconnect, consider using a tool such as \f[CR]tmux\f[R] inside the
 container so you can detach and reconnect later.
 Closing an ordinary exec terminal may interrupt its foreground work.
 .PP
-Authorization also ends at the index\(cqs absolute lifetime limit,
-including laptop sleep, or after 15 minutes with no running request or
-client.
-A live shell, log follower or port\-forward counts as active even when
-silent.
-This idle rule does not try to distinguish an unused prompt from a quiet
-experiment.
+Authorization also ends when its approved duration elapses, including
+laptop sleep.
+Request a new authorization if work must continue past that point.
 .PP
 The existing \f[CR]lab notebook\f[R] commands remain available for
 explicit Notebook workflows.
@@ -325,8 +336,10 @@ Reusable sessions are local to the same user account and assume trusted
 installed code and local clients.
 .SH Commands
 .SS session start
-Authorize reusable local access and stay in the foreground until closed
-or expired.
+Authorize reusable local access and stay in the foreground until closed,
+expired or its parent process exits.
+\f[CR]\-\-duration\f[R] sets the lifetime, capped by the index maximum;
+each \f[CR]\-\-cluster\f[R] restricts access to that registered cluster.
 The default is a hidden token prompt; \f[CR]\-\-request\-auth\f[R]
 accepts a private handoff from another terminal, and
 \f[CR]\-\-token\-stdin\f[R] accepts a trusted input pipe.
@@ -595,6 +608,14 @@ T{
 T}@T{
 Registered cluster ID.
 Also selects the cluster for an interactive session.
+For \f[CR]session start\f[R], allows only that cluster; repeat to allow
+more.
+T}
+T{
+\f[CR]\-\-duration DURATION\f[R]
+T}@T{
+Required lifetime for \f[CR]session start\f[R], such as \f[CR]90m\f[R],
+\f[CR]6h\f[R] or \f[CR]2d\f[R]; the index maximum still applies.
 T}
 T{
 \f[CR]\-\-namespace NAMESPACE\f[R]
@@ -920,11 +941,9 @@ The bootstrap contains references and the profiles directory.
 Credentials remain in 1Password; the Service Account Token is held by
 the authorized process and is not saved.
 Each session has an absolute lifetime, including time spent asleep,
-configured by \f[CR]session.max_age_seconds\f[R] in the index.
-Reusable CLI authorization also has a 15\-minute idle timeout when no
-request or client is active.
-Interactive Notebook sessions retain their absolute lifetime without
-this idle timer.
+capped by \f[CR]session.max_age_seconds\f[R] in the index.
+Reusable CLI authorization uses its requested \f[CR]\-\-duration\f[R]
+within that cap and also ends when the process that started it exits.
 .PP
 Shell and editor clients receive a temporary credential capability tied
 to the live lab process.

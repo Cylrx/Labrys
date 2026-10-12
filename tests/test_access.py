@@ -29,9 +29,12 @@ async def authorization(tmp_path, monkeypatch):
     documents.update({entry.config_ref: yaml.safe_dump(cluster_data()) for entry in index.clusters})
     secrets = SimpleNamespace(read=AsyncMock(side_effect=documents.__getitem__))
     bootstrap = {"index_ref": index_ref, "profiles_dir": str(profiles_dir(tmp_path))}
-    owner = access.Authorization(secrets, bootstrap, index, authorized_at=instant[0])
+    owner = access.Authorization(
+        secrets, bootstrap, index, instant[0], index.session.max_age_seconds
+    )
     state = SimpleNamespace(
         owner=owner,
+        index=index,
         secrets=secrets,
         instant=instant,
         sessions=[],
@@ -171,57 +174,25 @@ async def test_missing_profile_does_not_block_fresh_connections_to_multiple_clus
     assert state.secrets.deadline == original_deadline
 
 
-async def test_slow_metadata_read_suppresses_idle_expiration(authorization):
+async def test_requested_duration_and_clusters_bound_the_authorization(authorization):
     state = authorization
-    original_read = state.secrets.read.side_effect
-    entered, release = asyncio.Event(), asyncio.Event()
-
-    async def read(reference):
-        entered.set()
-        await release.wait()
-        return original_read(reference)
-
-    state.secrets.read.side_effect = read
-    client = asyncio.create_task(access.request(state.identity, "list"))
-    try:
-        await asyncio.wait_for(entered.wait(), 2)
-        state.instant[0] += access.IDLE_TIMEOUT + 1
-        await asyncio.sleep(0.3)
-        assert not state.task.done()
-        release.set()
-        assert (await client)["clusters"]
-    finally:
-        release.set()
-        await client
+    owner = access.Authorization(
+        SimpleNamespace(), {"index_ref": "", "profiles_dir": ""}, state.index, 0, 60
+    )
+    assert owner.deadline == 60
+    with pytest.raises(LabError, match="not registered: missing"):
+        access.Authorization(SimpleNamespace(), {}, state.index, 0, 60, ("missing",))
+    state.owner.clusters = ("second",)
+    assert await access.request(state.identity, "list") == {"clusters": [{"id": "second"}]}
+    with pytest.raises(LabError, match="not available in this session"):
+        await access.request(state.identity, "inspect", CLUSTER_ID)
 
 
-async def test_idle_begins_after_last_lease_and_its_cleanup(authorization):
+async def test_authorization_ends_when_its_requesting_process_exits(authorization, monkeypatch):
     state = authorization
-    first_reader, first = await lease(state.identity)
-    await response(first_reader)
-    second_reader, second = await lease(state.identity, "second")
-    await response(second_reader)
-    state.instant[0] += access.IDLE_TIMEOUT + 1
-    await asyncio.sleep(0.3)
-    assert not state.task.done()
-    await disconnect(first)
-    await asyncio.wait_for(state.sessions[0].closed.wait(), 2)
-    state.slow_cleanup = True
-    state.cleaning.clear()
-    await disconnect(second)
-    await asyncio.wait_for(state.cleaning.wait(), 2)
-    state.instant[0] += access.IDLE_TIMEOUT + 1
-    await asyncio.sleep(0.3)
-    assert not state.task.done()
-    state.cleanup_release.set()
-    await asyncio.wait_for(state.sessions[1].closed.wait(), 2)
-    await asyncio.sleep(0.05)
-    state.instant[0] += access.IDLE_TIMEOUT - 1
-    await asyncio.sleep(0.3)
-    assert not state.task.done()
-    state.instant[0] += 2
+    monkeypatch.setattr(access.os, "getppid", lambda: state.owner.parent + 1)
     await asyncio.wait_for(state.task, 2)
-    assert state.owner.reason == "idle timeout"
+    assert state.owner.reason == "requesting process exited"
 
 
 @pytest.mark.parametrize("ending", ["close", "expiry"])

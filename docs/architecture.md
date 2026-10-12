@@ -40,9 +40,11 @@ grant, then keeps the socket open until its client exits. The caller runs kubect
 locally with inherited standard streams, so terminals and pipes need no custom
 streaming protocol. Separate clients get separate cluster connections.
 
-The owner preserves the initial absolute authorization deadline across every
-connection. It also expires after 15 minutes without active requests or clients;
-the idle interval starts after the last client's cleanup finishes. Shutdown stops
+The owner preserves one absolute deadline, the requested duration capped by the
+index maximum, across every connection. It also ends when its parent process
+exits, which binds authorization to the agent or terminal that requested it. An
+optional cluster list hides every other indexed cluster from listing, inspection
+and connection. Shutdown stops
 new requests, drains connection cleanup, then acknowledges closure and removes
 the socket. A cleanup failure ends authorization with an error. These access paths
 do not load Notebook history or its encryption key.

@@ -156,8 +156,21 @@ def parser() -> Parser:
     )
     sessions = commands.add_parser("session", help="Manage reusable local authorization")
     session_actions = sessions.add_subparsers(dest="action", required=True)
-    session_actions.add_parser(
+    starting = session_actions.add_parser(
         "start", help="Authorize and keep this process running", parents=[authorization]
+    )
+    starting.add_argument(
+        "--duration",
+        required=True,
+        help="Authorization lifetime such as 90m, 6h or 2d; the index maximum still applies",
+    )
+    starting.add_argument(
+        "--cluster",
+        dest="clusters",
+        metavar="CLUSTER",
+        action="append",
+        default=[],
+        help="Allow only this registered cluster ID; repeat to allow more (default: all)",
     )
     closing = session_actions.add_parser(
         "close", help="Close local access without stopping Notebooks"
@@ -246,18 +259,25 @@ def validate_arguments(args, *, interactive=False) -> None:
             )
         if args.command not in {"kubectl", "resources"} and args.cluster:
             raise LabError("Use the registered cluster ID argument with cluster inspect.", 2)
-        if not starting:
-            access.socket_path(args.session)
-        identity = (
-            args.cluster
-            if args.command in {"kubectl", "resources"}
-            else getattr(args, "cluster_id", None)
-        )
-        if identity is not None:
+        if starting:
             try:
-                cluster_name(identity)
-            except (ValueError, TypeError):
-                raise LabError("Invalid registered cluster ID.", 2) from None
+                auth.duration(args.duration)
+            except ValueError:
+                raise LabError("Duration must look like 90m, 6h or 2d.", 2) from None
+            identities = args.clusters
+        else:
+            access.socket_path(args.session)
+            identities = [
+                args.cluster
+                if args.command in {"kubectl", "resources"}
+                else getattr(args, "cluster_id", None)
+            ]
+        for identity in identities:
+            if identity is not None:
+                try:
+                    cluster_name(identity)
+                except (ValueError, TypeError):
+                    raise LabError("Invalid registered cluster ID.", 2) from None
         if args.command == "kubectl":
             if not args.cluster or args.json:
                 raise LabError(
@@ -665,7 +685,14 @@ async def run_access(args) -> dict | int | None:
             token = ""
             authorized_at = clock.now()
             index = parse_index(await secrets.read(bootstrap["index_ref"]))
-            owner = access.Authorization(secrets, bootstrap, index, authorized_at)
+            owner = access.Authorization(
+                secrets,
+                bootstrap,
+                index,
+                authorized_at,
+                auth.duration(args.duration),
+                tuple(args.clusters),
+            )
 
             def ready(data):
                 result = emit("session.start", "Ready", data=data, machine=args.json)
