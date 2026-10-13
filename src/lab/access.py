@@ -14,7 +14,7 @@ from pathlib import Path
 
 from lab import clock
 from lab.auth import peer_uid
-from lab.config import Index, cluster_name, namespace_name, parse_cluster, parse_index
+from lab.config import Cluster, Index, cluster_name, namespace_name, parse_cluster
 from lab.editor import stop_client
 from lab.errors import LabError
 from lab.kubernetes import Kubernetes
@@ -105,7 +105,11 @@ class Authorization:
         if unknown := set(clusters) - {entry.id for entry in index.clusters}:
             raise LabError(f"Cluster is not registered: {', '.join(sorted(unknown))}.", 4)
         self.secrets: Secrets | None = secrets
-        self.index_ref = bootstrap["index_ref"]
+        # The index read at approval and each cluster configuration, read on first use, serve the
+        # whole authorization: every 1Password read counts against the account's daily quota.
+        # Registration changes take effect with the next authorization.
+        self.index = index
+        self.configs: dict[str, Cluster] = {}
         self.profiles_dir = Path(bootstrap["profiles_dir"])
         self.clusters = clusters
         self.authorized_at = authorized_at
@@ -128,21 +132,25 @@ class Authorization:
         if self.stopping.is_set() or clock.now() >= self.deadline:
             raise LabError("Authorization session ended. Start a new session.", 3)
 
-    async def _entries(self):
-        self._check()
-        assert self.secrets is not None
-        index = parse_index(await self.secrets.read(self.index_ref))
-        return [entry for entry in index.clusters if not self.clusters or entry.id in self.clusters]
+    @property
+    def entries(self):
+        return [
+            entry for entry in self.index.clusters if not self.clusters or entry.id in self.clusters
+        ]
 
     async def _cluster(self, identity: str):
-        entry = next((entry for entry in await self._entries() if entry.id == identity), None)
+        self._check()
+        entry = next((entry for entry in self.entries if entry.id == identity), None)
         if entry is None:
             raise LabError(
                 "Cluster is not available in this session. Use lab cluster list with this session.",
                 4,
             )
-        assert self.secrets is not None
-        return parse_cluster(await self.secrets.read(entry.config_ref), identity)
+        if identity not in self.configs:
+            assert self.secrets is not None
+            config = await self.secrets.read(entry.config_ref)
+            self.configs[identity] = parse_cluster(config, identity)
+        return self.configs[identity]
 
     async def _inspect(self, identity: str) -> dict:
         cluster = await self._cluster(identity)
@@ -289,7 +297,8 @@ class Authorization:
                     raise self.cleanup_error
                 data = {"status": "Closed"}
             elif operation == "list":
-                data = {"clusters": [{"id": entry.id} for entry in await self._entries()]}
+                self._check()
+                data = {"clusters": [{"id": entry.id} for entry in self.entries]}
             elif operation == "inspect":
                 data = await self._inspect(request["cluster"])
             elif operation == "resources":
@@ -360,6 +369,7 @@ class Authorization:
                             "Local connection cleanup could not be fully confirmed.", 8
                         )
                 self.secrets = None
+                self.configs.clear()
                 self.closed.set()
                 await asyncio.gather(*self.closers, return_exceptions=True)
                 await server.wait_closed()

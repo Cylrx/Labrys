@@ -220,7 +220,7 @@ lab cluster list \-\-session lab\-session\-example \-\-json
 lab cluster inspect research\-example \-\-session lab\-session\-example \-\-json
 .EE
 .PP
-Listing reads the 1Password connection index.
+Listing uses the connection index read at approval.
 Inspection returns connection metadata and local creation rules, without
 credentials.
 A missing profile is reported but does not prevent kubectl access.
@@ -345,6 +345,11 @@ accepts a private handoff from another terminal, and
 \f[CR]\-\-token\-stdin\f[R] accepts a trusted input pipe.
 The session reads the connection index without requiring a cluster ID,
 private creation profile or local\-history encryption key.
+It reads the index once at approval and each cluster\[cq]s configuration
+once on first use, so later commands spend no 1Password reads.
+Changes to the index or a cluster\[cq]s connection note in 1Password
+apply from the next session, so start a new session after rotating
+Kubernetes credentials.
 No token is saved on disk.
 .SS session close SESSION
 End the selected authorization and wait for its cluster connections to
@@ -355,9 +360,9 @@ shortly afterward.
 Cleanup failures are reported as errors rather than successful closure.
 Remote Notebooks are left on the cluster.
 .SS cluster list
-With \f[CR]\-\-session SESSION\f[R], read the current index and return
-\f[CR]clusters\f[R], a list of objects containing registered
-\f[CR]id\f[R] values.
+With \f[CR]\-\-session SESSION\f[R], return \f[CR]clusters\f[R], a
+list of objects containing the registered
+\f[CR]id\f[R] values from the index read at approval.
 This does not connect to Kubernetes.
 .SS cluster inspect CLUSTER
 With \f[CR]\-\-session SESSION\f[R], read the registered connection and
@@ -501,7 +506,8 @@ Omit \f[CR]\-\-cluster\-id\f[R] to select an entry.
 Save the proposed index in 1Password and confirm its read\-back.
 Removing a registration leaves the profile, connection note, local
 history and remote Notebooks intact.
-Existing lab sessions remain authorized.
+Existing lab sessions keep access, including to the removed cluster,
+until they end; close them to apply the removal.
 .PP
 Avoid concurrent index edits: a manual save and lab\(cqs read\-back are
 separate operations.

@@ -34,8 +34,9 @@ stays in the foreground. The directory and socket are user-owned; both peers
 check the Unix user identity. Session IDs are locators, not bearer credentials.
 No token is stored in the directory. The local user account and code are trusted.
 
-Each socket handler owns one request. Metadata requests read the index or selected
-connection and profile. A kubectl request creates an ordinary `Session` and client
+Each socket handler owns one request. The authorization reads the index once at
+approval and each cluster's connection once on first use, then reuses them until it
+ends; profiles are read from disk on each request. A kubectl request creates an ordinary `Session` and client
 grant, then keeps the socket open until its client exits. The caller runs kubectl
 locally with inherited standard streams, so terminals and pipes need no custom
 streaming protocol. Separate clients get separate cluster connections, client

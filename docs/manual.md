@@ -182,7 +182,7 @@ lab cluster list --session lab-session-example --json
 lab cluster inspect research-example --session lab-session-example --json
 ```
 
-Listing reads the 1Password connection index. Inspection returns connection
+Listing uses the connection index read at approval. Inspection returns connection
 metadata and local creation rules, without credentials. A missing profile is
 reported but does not prevent kubectl access. Profile namespaces describe creation
 rules, not the full set of namespaces the Kubernetes credential can access.
@@ -282,7 +282,11 @@ maximum; each `--cluster` restricts access to that registered cluster. The
 default is a hidden token prompt; `--request-auth` accepts a private
 handoff from another terminal, and `--token-stdin` accepts a trusted input pipe.
 The session reads the connection index without requiring a cluster ID, private
-creation profile or local-history encryption key. No token is saved on disk.
+creation profile or local-history encryption key. It reads the index once at
+approval and each cluster's configuration once on first use, so later commands
+spend no 1Password reads. Changes to the index or a cluster's connection note in
+1Password apply from the next session, so start a new session after rotating
+Kubernetes credentials. No token is saved on disk.
 
 ## session close SESSION
 
@@ -294,8 +298,9 @@ on the cluster.
 
 ## cluster list
 
-With `--session SESSION`, read the current index and return `clusters`, a list of
-objects containing registered `id` values. This does not connect to Kubernetes.
+With `--session SESSION`, return `clusters`, a list of objects containing the
+registered `id` values from the index read at approval. This does not connect to
+Kubernetes.
 
 ## cluster inspect CLUSTER
 
@@ -377,7 +382,8 @@ you to save and verify the updated index. Registration does not create a Noteboo
 Remove a registration from the index. Omit `--cluster-id` to select an entry.
 Save the proposed index in 1Password and confirm its read-back. Removing a
 registration leaves the profile, connection note, local history and remote
-Notebooks intact. Existing lab sessions remain authorized.
+Notebooks intact. Existing lab sessions keep access, including to the removed
+cluster, until they end; close them to apply the removal.
 
 Avoid concurrent index edits: a manual save and lab's read-back are separate
 operations. Recheck repeats verification; Cancel does not undo a saved change.

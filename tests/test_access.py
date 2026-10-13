@@ -132,7 +132,7 @@ async def disconnect(writer):
     await writer.wait_closed()
 
 
-async def test_discovery_reads_only_index_and_inspection_never_exposes_credentials(authorization):
+async def test_discovery_reads_no_secret_and_inspection_reads_config_once(authorization):
     state = authorization
     path = access.socket_path(state.identity)
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
@@ -140,8 +140,11 @@ async def test_discovery_reads_only_index_and_inspection_never_exposes_credentia
     assert await access.request(state.identity, "list") == {
         "clusters": [{"id": CLUSTER_ID}, {"id": "second"}]
     }
-    state.secrets.read.assert_awaited_once_with(state.owner.index_ref)
+    state.secrets.read.assert_not_awaited()
     result = await access.request(state.identity, "inspect", CLUSTER_ID)
+    assert await access.request(state.identity, "inspect", CLUSTER_ID) == result
+    config_ref = state.index.clusters[0].config_ref
+    state.secrets.read.assert_awaited_once_with(config_ref)
     assert result == {
         "id": CLUSTER_ID,
         "context": "fictional",
@@ -192,6 +195,7 @@ async def test_requested_duration_and_clusters_bound_the_authorization(authoriza
         access.Authorization(
             SimpleNamespace(), {}, state.index, 0, 60, ("missing",), parent=os.getppid()
         )
+    await access.request(state.identity, "inspect", CLUSTER_ID)
     state.owner.clusters = ("second",)
     assert await access.request(state.identity, "list") == {"clusters": [{"id": "second"}]}
     with pytest.raises(LabError, match="not available in this session"):
@@ -218,14 +222,12 @@ async def test_ssh_sessions_share_one_forwarder_per_cluster_until_shutdown(
     access.Toolchain.load().ssh = Path("/protected/ssh")
     routed = cluster_data()
     routed["transport"] = {"mode": "ssh", "ssh_target": "synthetic-target"}
-    index_document = state.secrets.read.side_effect
-    state.secrets.read.side_effect = lambda ref: (
-        index_document(ref) if ref == state.owner.index_ref else yaml.safe_dump(routed)
-    )
+    state.secrets.read.side_effect = lambda ref: yaml.safe_dump(routed)
     for cluster in (CLUSTER_ID, CLUSTER_ID, "second"):
         reader, writer = await lease(state.identity, cluster)
         assert "data" in await response(reader)
         await disconnect(writer)
+    assert state.secrets.read.await_count == 2
     first, again, other = (session.route for session in state.sessions)
     assert first is again and first is not other
     assert len(forwarders) == 2
@@ -459,3 +461,14 @@ async def test_explicit_close_waits_for_cleanup_already_started_by_client_eof(au
     finally:
         state.cleanup_release.set()
         await closer
+
+
+async def test_a_failed_configuration_read_is_not_cached(authorization):
+    state = authorization
+    documents = state.secrets.read.side_effect
+    state.secrets.read.side_effect = LabError("Synthetic read failure.", 3)
+    with pytest.raises(LabError, match="Synthetic read failure"):
+        await access.request(state.identity, "inspect", CLUSTER_ID)
+    state.secrets.read.side_effect = documents
+    assert (await access.request(state.identity, "inspect", CLUSTER_ID))["id"] == CLUSTER_ID
+    assert state.secrets.read.await_count == 2
