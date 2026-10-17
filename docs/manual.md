@@ -80,7 +80,7 @@ Other versions are rejected by the compatibility check.
 
 # Interactive use
 
-The session menu offers Notebook actions, Cluster resources and connection controls. Choose an
+The session menu offers Notebook actions, Cluster resources and workloads, and connection controls. Choose an
 action or type a Notebook command without the `lab notebook` prefix, for example
 `list --namespace research`. Forms ask for missing values and show the manifest
 before creation.
@@ -121,8 +121,8 @@ Escape returns. CPU and memory are shown alongside the selected resource.
 The calculation subtracts effective requests of visible, assigned pods from each
 node's allocatable resources. It includes init containers, restartable sidecars,
 pod-level budgets and overhead. These are reservations, not measured utilization.
-Completed and unassigned pods are filtered by the API server before pagination;
-assigned Pending and terminating pods remain counted.
+Completed pods are filtered by the API server before pagination. Unassigned pods
+reserve nothing; assigned Pending and terminating pods remain counted.
 Requests that cannot be reliably accounted for, including resizing pods and DRA
 claims, are excluded from observed reservations and the result is labelled as an
 upper bound. Other readable reservations still contribute. DRA device inventory
@@ -140,6 +140,37 @@ and Lab remembers them for future visits.
 The overview's remaining totals use Ready, uncordoned nodes. Taints, namespace
 quotas, queued work and other placement rules may further restrict what a job can
 obtain. Refresh failures keep the previous timestamped snapshot with a warning.
+
+## Cluster workloads
+
+Choose **Cluster workloads** or type `workloads` in the session menu to see who
+holds a resource. It asks for the same namespace hint and reads the same pods as
+**Cluster resources**, so namespace coverage and upper bounds work the same way.
+
+The page has three levels. **OWNERS** lists each owner with the units they hold,
+the units their unplaced pods are waiting for, and their workloads and nodes.
+`Enter` opens that owner's workloads; `Tab` switches to every workload at once.
+A workload is the set of pods sharing a controller, such as a training job, a
+Kubeflow Notebook or a ReplicaSet. `Enter` on a workload lists its pods, their
+nodes and, for pods that cannot be placed, the scheduler's reason. Escape goes
+back one level.
+
+Held counts requests of pods already placed on a node; waiting pods hold nothing
+yet. Requests Lab cannot interpret, such as Dynamic Resource Allocation claims,
+show `?` and turn totals into lower bounds instead of being counted as zero. The owner is the pod label named by `owner_label_key` in the cluster's
+creation profile; without a profile every workload is listed without an owner.
+CPU and RAM show current use beside the request, as reported by the optional
+`metrics.k8s.io` API that `kubectl top` reads; `?` means no sample was available.
+GPU activity is not part of the Kubernetes API and is not shown.
+
+The search bar matches anything a row shows: workload, owner, kind, namespace or
+node. Each word may match a whole word, part of one, or just its letters in order,
+and closer matches rank first. `/` focuses it; arrow keys keep moving the list and
+`Enter` opens the selected row. Click a column heading to sort by it ascending,
+then descending, then back to the default order; `s` moves the sort to the next
+column and `S` reverses it. `f` also shows workloads that neither hold nor wait for
+the selected resource, `g` selects the resource, `r` refreshes, `n` adds namespace
+names, and `?` shows help.
 
 # AI agents and automation
 

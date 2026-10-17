@@ -105,6 +105,10 @@ Kubernetes client. It produces a snapshot with explicit namespace coverage and
 unknown accounting. `resource_view` renders that snapshot in the session's
 existing terminal application, with bounded pages and a native search buffer.
 The view requires neither a creation profile nor cluster-specific resource ratios.
+The snapshot also keeps a minimal record of each live pod, including unassigned
+ones: names, node, phase, controller, owner label and requests, never its spec.
+`workloads` groups those records by controller and adds optional `metrics.k8s.io`
+usage; `workload_view` browses them with the same refresh loop as `resource_view`.
 The `resources` CLI command uses the same reader through the existing authorization
 socket. Its connection is owned by that request and closes on completion,
 cancellation or authorization expiry. Only the resource report crosses the socket;

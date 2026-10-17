@@ -3,7 +3,7 @@
 import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -358,6 +358,19 @@ async def test_resources_menu_uses_existing_session_without_creation_policy(app,
     await app.run()
     browse.assert_awaited_once_with(app.service.api, app.ui, ("research",))
     assert app.service.api.posts == []
+
+
+async def test_workloads_menu_names_owners_with_the_profile_label(app, monkeypatch):
+    browse, view = AsyncMock(return_value=()), Mock()
+    monkeypatch.setattr(interface, "browse_resources", browse)
+    monkeypatch.setattr(interface, "WorkloadView", view)
+    app.ui.answers["Session menu"] = ["workloads", "exit"]
+    app.ui.answers["Namespace"] = [{"namespace": "research"}]
+    await app.run()
+    api, ui, known, _, page = browse.await_args.args
+    assert (api, ui, known) == (app.service.api, app.ui, ("research",))
+    page("snapshot")
+    view.assert_called_once_with("snapshot", app.service.profile().owner_label_key, CLUSTER_ID)
 
 
 async def test_resource_namespace_prompt_cancels_before_loading(app, monkeypatch):

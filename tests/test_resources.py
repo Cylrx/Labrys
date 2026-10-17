@@ -322,9 +322,7 @@ async def test_cancelling_discovery_joins_namespace_reads():
 
 
 @pytest.mark.parametrize("cluster_wide", [True, False])
-async def test_pod_queries_filter_history_and_unassigned_pods_on_the_server(
-    api_server, cluster_wide
-):
+async def test_pod_queries_filter_finished_pods_on_the_server(api_server, cluster_wide):
     queries = []
 
     async def response(request):
@@ -333,9 +331,7 @@ async def test_pod_queries_filter_history_and_unassigned_pods_on_the_server(
             return web.json_response({"items": [node()]})
         if request.path == "/api/v1/namespaces":
             return web.json_response({"items": [{"metadata": {"name": "research"}}]})
-        assert request.query["fieldSelector"] == (
-            "status.phase!=Succeeded,status.phase!=Failed,spec.nodeName!="
-        )
+        assert request.query["fieldSelector"] == ("status.phase!=Succeeded,status.phase!=Failed")
         queries.append(request.path)
         if request.path == "/api/v1/pods" and not cluster_wide:
             return web.Response(status=403)

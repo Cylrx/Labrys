@@ -16,6 +16,9 @@ Run it with `lab`, or `labrys` if you prefer the full name. They are the same co
 The **Cluster resources** menu shows node-level GPU resource units, CPU and memory
 headroom, with search and pagination for larger clusters. Limited namespace access
 is shown explicitly as an upper bound.
+The **Cluster workloads** menu shows who holds those units: owners, their
+workloads and each workload's pods, with current CPU and memory use when the
+cluster serves `metrics.k8s.io`.
 `lab resources --session SESSION --cluster CLUSTER` exposes the same calculation
 as a text table; add `--json` for agents and scripts.
 

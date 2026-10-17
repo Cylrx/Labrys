@@ -9,7 +9,8 @@ from lab.config import namespace_name, quantity
 from lab.errors import LabError
 from lab.kubernetes import ApiError, Kubernetes, resource_path
 
-RESERVING_PODS = "status.phase!=Succeeded,status.phase!=Failed,spec.nodeName!="
+# Unassigned pods reserve nothing; they are kept so workloads can show what is waiting.
+LIVE_PODS = "status.phase!=Succeeded,status.phase!=Failed"
 
 
 def amount(value: int | None, resource: str) -> str:
@@ -126,11 +127,64 @@ class NodeResources:
         )
 
 
+@dataclass(frozen=True)
+class PodRecord:
+    """The few pod facts workloads need; never environment, commands or annotations."""
+
+    namespace: str
+    name: str
+    node: str  # empty until the scheduler places the pod
+    phase: str
+    started: datetime | None
+    workload: tuple[str, str]  # controller kind and name, or ("Pod", name) without one
+    owner: str
+    requests: dict[str, int] | None  # None when the requests cannot be interpreted
+    waiting: str  # the scheduler's explanation while the pod cannot be placed
+
+
+def pod_record(pod: dict, requests: dict[str, int] | None, owner_key: str) -> PodRecord:
+    metadata, status = pod["metadata"], pod.get("status", {})
+    labels = metadata.get("labels", {})
+    controller = next(
+        (item for item in metadata.get("ownerReferences", []) if item.get("controller")), None
+    )
+    workload = (controller["kind"], controller["name"]) if controller else ("Pod", metadata["name"])
+    # Kubeflow creates a same-named StatefulSet per Notebook and labels its Pods notebook-name.
+    if workload[0] == "StatefulSet" and labels.get("notebook-name") == workload[1]:
+        workload = ("Notebook", workload[1])
+    try:
+        started = datetime.fromisoformat(
+            status.get("startTime") or metadata.get("creationTimestamp", "")
+        )
+    except ValueError:
+        started = None
+    return PodRecord(
+        metadata.get("namespace", ""),
+        metadata["name"],
+        pod.get("spec", {}).get("nodeName") or "",
+        status.get("phase", "Unknown"),
+        started,
+        workload,
+        labels.get(owner_key, "") if owner_key else "",
+        requests,
+        next(
+            (
+                condition.get("message", "")
+                for condition in status.get("conditions", [])
+                if condition.get("type") == "PodScheduled" and condition.get("status") == "False"
+            ),
+            "",
+        ),
+    )
+
+
 @dataclass
 class ResourceSnapshot:
     nodes: list[NodeResources]
     namespaces: tuple[str, ...] | None
     issues: tuple[str, ...]
+    pods: list[PodRecord] | None = None
+    usage: dict[tuple[str, str], dict[str, int]] | None = None  # metrics.k8s.io, when read
     observed_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     @property
@@ -203,24 +257,33 @@ class ResourceSnapshot:
         }
 
 
-def snapshot(nodes: list[dict], pods: list[dict] | None, namespaces, issues=()) -> ResourceSnapshot:
+def snapshot(
+    nodes: list[dict], pods: list[dict] | None, namespaces, issues=(), owner_key=""
+) -> ResourceSnapshot:
     """Bind non-terminal assigned pods to nodes; never treat missing reads as zero."""
     reservations: dict[str, dict[str, int]] = defaultdict(dict)
     unknown: dict[str, str] = {}
     seen = set()
+    records = []
     for pod in pods or []:
-        node = pod.get("spec", {}).get("nodeName")
-        if not node or pod.get("status", {}).get("phase") in {"Succeeded", "Failed"}:
-            continue
         metadata = pod["metadata"]
         identity = metadata.get("uid") or (metadata.get("namespace"), metadata["name"])
-        if identity in seen:
+        if identity in seen or pod.get("status", {}).get("phase") in {"Succeeded", "Failed"}:
             continue
         seen.add(identity)
+        requests: dict[str, int] | None
         try:
-            reservations[node] = combine(reservations[node], pod_requests(pod))
+            requests = pod_requests(pod)
         except ValueError as error:
-            unknown[node] = str(error)
+            requests, problem = None, str(error)
+        records.append(pod_record(pod, requests, owner_key))
+        node = pod.get("spec", {}).get("nodeName")
+        if not node:
+            continue
+        if requests is None:
+            unknown[node] = problem
+        else:
+            reservations[node] = combine(reservations[node], requests)
     result = []
     for node in nodes:
         name = node["metadata"]["name"]
@@ -261,10 +324,14 @@ def snapshot(nodes: list[dict], pods: list[dict] | None, namespaces, issues=()) 
                 issue,
             )
         )
-    return ResourceSnapshot(result, namespaces, tuple(issues))
+    return ResourceSnapshot(
+        result, namespaces, tuple(issues), records if pods is not None else None
+    )
 
 
-async def load_resources(api: Kubernetes, namespaces: tuple[str, ...] = ()) -> ResourceSnapshot:
+async def load_resources(
+    api: Kubernetes, namespaces: tuple[str, ...] = (), owner_key: str = ""
+) -> ResourceSnapshot:
     """Subtract every readable reservation from allocatable capacity, using namespace hints."""
     try:
         namespaces = tuple(dict.fromkeys(namespace_name(name) for name in namespaces))
@@ -272,12 +339,12 @@ async def load_resources(api: Kubernetes, namespaces: tuple[str, ...] = ()) -> R
         raise LabError(str(error), 2) from None
     nodes = await api.collection("/api/v1/nodes")
     try:
-        pods = await api.collection("/api/v1/pods", fieldSelector=RESERVING_PODS)
+        pods = await api.collection("/api/v1/pods", fieldSelector=LIVE_PODS)
     except ApiError as error:
         if error.status != 403:
             raise
     else:
-        return snapshot(nodes, pods, None)
+        return snapshot(nodes, pods, None, owner_key=owner_key)
     candidates = set(namespaces)
     issues = []
     try:
@@ -299,9 +366,7 @@ async def load_resources(api: Kubernetes, namespaces: tuple[str, ...] = ()) -> R
             try:
                 return (
                     namespace,
-                    await api.collection(
-                        resource_path(namespace, "pods"), fieldSelector=RESERVING_PODS
-                    ),
+                    await api.collection(resource_path(namespace, "pods"), fieldSelector=LIVE_PODS),
                     "",
                 )
             except LabError as error:
@@ -318,4 +383,4 @@ async def load_resources(api: Kubernetes, namespaces: tuple[str, ...] = ()) -> R
             readable.append(namespace)
     if not readable:
         issues.append("Capacity ceilings only; no reservations readable. n adds namespace hints")
-    return snapshot(nodes, pods if readable else None, tuple(readable), issues)
+    return snapshot(nodes, pods if readable else None, tuple(readable), issues, owner_key)

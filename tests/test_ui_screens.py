@@ -130,11 +130,18 @@ async def test_ghost_acceptance_numeric_controls_and_secret_mask():
         await asyncio.sleep(0.04)
         assert screens.page.inputs["gpus"].area.text == "8"
         assert token.area.text == secret
-        screen = screens.page.app.renderer._last_screen
-        rendered = "\n".join(
-            "".join(cell.char for cell in row.values()) for row in screen.data_buffer.values()
-        )
-        assert secret not in rendered and "*" * len(secret) in rendered
+
+        def rendered():
+            screen = screens.page.app.renderer._last_screen
+            return "\n".join(
+                "".join(cell.char for cell in row.values()) for row in screen.data_buffer.values()
+            )
+
+        for _ in range(100):  # the input has arrived; the redraw is throttled
+            if "*" * len(secret) in rendered():
+                break
+            await asyncio.sleep(0.01)
+        assert secret not in rendered() and "*" * len(secret) in rendered()
         keys.send_text("\t\t\r")
         assert await asyncio.wait_for(task, 1) == {
             "image": "previous:v1",

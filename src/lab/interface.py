@@ -30,6 +30,8 @@ from lab.policy import Profile
 from lab.resource_view import browse_resources
 from lab.tools import Toolchain
 from lab.ui import Field, Screens
+from lab.workload_view import WorkloadView
+from lab.workloads import load_workloads
 
 FIELDS = (
     ("name", "Notebook name", "Identity"),
@@ -144,7 +146,10 @@ class Interactive:
                         ),
                         (
                             "CLUSTER",
-                            [("resources", "Cluster resources")],
+                            [
+                                ("resources", "Cluster resources"),
+                                ("workloads", "Cluster workloads"),
+                            ],
                         ),
                         (
                             "MANAGE",
@@ -195,8 +200,8 @@ class Interactive:
                     await self.ui.work(session.reconnect(), "Reconnecting")
                 elif editor_only:
                     raise LabError("Available actions: status, reconnect, disconnect.", 2)
-                elif command == "resources":
-                    await self.resources()
+                elif command in {"resources", "workloads"}:
+                    await self.resources(workloads=command == "workloads")
                 elif command.startswith("operation:"):
                     await self.operation(command.removeprefix("operation:"))
                 elif command == "operations":
@@ -279,7 +284,7 @@ class Interactive:
             [("back", "Session menu")],
         )
 
-    async def resources(self) -> None:
+    async def resources(self, workloads: bool = False) -> None:
         """Seed discovery from this cluster's existing settings and remember additional names."""
         namespace = await self.namespace(
             "Enter a namespace you can read. This helps discovery; "
@@ -287,12 +292,24 @@ class Interactive:
         )
         self.service.history.remember(self.cluster_id, namespace, {})
         namespaces = self.service.history.candidates(self.cluster_id, "", "namespace")
+        profile = None
         with suppress(LabError):
-            namespaces.extend(self.service.profile().namespace_rules)
+            profile = self.service.profile()
+            namespaces.extend(profile.namespace_rules)
         if configured := self.service.cluster.kubernetes.namespace:
             namespaces.append(configured)
         known = tuple(dict.fromkeys(namespaces))
-        remembered = await browse_resources(self.service.api, self.ui, known)
+        if workloads:
+            owner_key = profile.owner_label_key if profile else ""
+            remembered = await browse_resources(
+                self.service.api,
+                self.ui,
+                known,
+                lambda api, names: load_workloads(api, names, owner_key),
+                lambda data: WorkloadView(data, owner_key, self.cluster_id),
+            )
+        else:
+            remembered = await browse_resources(self.service.api, self.ui, known)
         for namespace in remembered:
             if namespace not in known:
                 self.service.history.remember(self.cluster_id, namespace, {})

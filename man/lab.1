@@ -84,7 +84,7 @@ currently accepts VS Code 1.137.0 with Dev Containers 0.469.0.
 Other versions are rejected by the compatibility check.
 .SH Interactive use
 The session menu offers Notebook actions, Cluster resources and
-connection controls.
+workloads, and connection controls.
 Choose an action or type a Notebook command without the
 \f[CR]lab notebook\f[R] prefix, for example
 \f[CR]list \-\-namespace research\f[R].
@@ -143,8 +143,9 @@ from each node\(cqs allocatable resources.
 It includes init containers, restartable sidecars, pod\-level budgets
 and overhead.
 These are reservations, not measured utilization.
-Completed and unassigned pods are filtered by the API server before
-pagination; assigned Pending and terminating pods remain counted.
+Completed pods are filtered by the API server before pagination.
+Unassigned pods reserve nothing; assigned Pending and terminating pods
+remain counted.
 Requests that cannot be reliably accounted for, including resizing pods
 and DRA claims, are excluded from observed reservations and the result
 is labelled as an upper bound.
@@ -167,6 +168,50 @@ The overview\(cqs remaining totals use Ready, uncordoned nodes.
 Taints, namespace quotas, queued work and other placement rules may
 further restrict what a job can obtain.
 Refresh failures keep the previous timestamped snapshot with a warning.
+.SS Cluster workloads
+Choose \f[B]Cluster workloads\f[R] or type \f[CR]workloads\f[R] in the
+session menu to see who holds a resource.
+It asks for the same namespace hint and reads the same pods as
+\f[B]Cluster resources\f[R], so namespace coverage and upper bounds work
+the same way.
+.PP
+The page has three levels.
+\f[B]OWNERS\f[R] lists each owner with the units they hold, the units
+their unplaced pods are waiting for, and their workloads and nodes.
+\f[CR]Enter\f[R] opens that owner\(cqs workloads; \f[CR]Tab\f[R]
+switches to every workload at once.
+A workload is the set of pods sharing a controller, such as a training
+job, a Kubeflow Notebook or a ReplicaSet.
+\f[CR]Enter\f[R] on a workload lists its pods, their nodes and, for pods
+that cannot be placed, the scheduler\(cqs reason.
+Escape goes back one level.
+.PP
+Held counts requests of pods already placed on a node; waiting pods hold
+nothing yet.
+Requests Lab cannot interpret, such as Dynamic Resource Allocation
+claims, show \f[CR]?\f[R] and turn totals into lower bounds instead of
+being counted as zero.
+The owner is the pod label named by \f[CR]owner_label_key\f[R] in the
+cluster\(cqs creation profile; without a profile every workload is
+listed without an owner.
+CPU and RAM show current use beside the request, as reported by the
+optional \f[CR]metrics.k8s.io\f[R] API that \f[CR]kubectl top\f[R]
+reads; \f[CR]?\f[R] means no sample was available.
+GPU activity is not part of the Kubernetes API and is not shown.
+.PP
+The search bar matches anything a row shows: workload, owner, kind,
+namespace or node.
+Each word may match a whole word, part of one, or just its letters in
+order, and closer matches rank first.
+\f[CR]/\f[R] focuses it; arrow keys keep moving the list and
+\f[CR]Enter\f[R] opens the selected row.
+Click a column heading to sort by it ascending, then descending, then
+back to the default order; \f[CR]s\f[R] moves the sort to the next
+column and \f[CR]S\f[R] reverses it.
+\f[CR]f\f[R] also shows workloads that neither hold nor wait for the
+selected resource, \f[CR]g\f[R] selects the resource, \f[CR]r\f[R]
+refreshes, \f[CR]n\f[R] adds namespace names, and \f[CR]?\f[R] shows
+help.
 .SH AI agents and automation
 Use a Notebook prepared by the user by default.
 Create, start, stop or delete a Notebook only when the user explicitly

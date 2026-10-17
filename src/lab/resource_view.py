@@ -2,7 +2,8 @@
 
 import asyncio
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from prompt_toolkit.application import get_app
 from prompt_toolkit.data_structures import Point
@@ -43,6 +44,8 @@ def fit(text: str, width: int, right=False, *, middle=False) -> str:
 
 class ResourceView(UIControl):
     """Keep a bounded node page, search buffer, and filters over one snapshot."""
+
+    title = "Cluster resources"
 
     filters = (
         "All nodes",
@@ -508,12 +511,14 @@ class ResourceView(UIControl):
 
 
 async def browse_resources(
-    api: Kubernetes, screens: Screens, namespaces: tuple[str, ...] = ()
+    api: Kubernetes,
+    screens: Screens,
+    namespaces: tuple[str, ...] = (),
+    load: Callable[[Kubernetes, tuple[str, ...]], Awaitable[ResourceSnapshot]] = load_resources,
+    page: Callable[[ResourceSnapshot], Any] = ResourceView,
 ) -> tuple[str, ...]:
     """Refresh on request and retain a visibly dated snapshot after a failed refresh."""
-    view = ResourceView(
-        await screens.work(load_resources(api, namespaces), "Reading cluster resources")
-    )
+    view = page(await screens.work(load(api, namespaces), "Reading cluster resources"))
     while True:
         action = await screens.resources(view)
         if action == "back":
@@ -539,9 +544,7 @@ async def browse_resources(
                         ]
                     )
                 )
-            view.update(
-                await screens.work(load_resources(api, candidates), "Reading cluster resources")
-            )
+            view.update(await screens.work(load(api, candidates), "Reading cluster resources"))
             namespaces = candidates
         except LabError as error:
             task = asyncio.current_task()

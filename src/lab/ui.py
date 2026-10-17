@@ -51,6 +51,7 @@ from lab.errors import LabError
 
 if TYPE_CHECKING:
     from lab.resource_view import ResourceView
+    from lab.workload_view import WorkloadView
 
 T = TypeVar("T")
 
@@ -1250,11 +1251,11 @@ class Screens:
                 ui.clear()
                 ui.app = None
 
-    async def resources(self, view: ResourceView) -> str:
-        """Show the resource browser in the existing terminal application."""
+    async def resources(self, view: ResourceView | WorkloadView) -> str:
+        """Show a cluster browser page in the existing terminal application."""
         ui = self._page()
         respond = self._respond(ui)
-        ui._begin("Cluster resources", "", lambda: respond("back"), "")
+        ui._begin(view.title, "", lambda: respond("back"), "")
         generation = ui._generation
         view.respond = respond
         view.enabled = lambda: ui.accepting and ui._generation == generation

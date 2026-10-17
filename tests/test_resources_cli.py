@@ -280,10 +280,7 @@ async def test_resources_use_the_real_tls_route_without_exporting_credentials(
         if path == "/api/v1/nodes":
             return [node()]
         assert path == "/api/v1/pods"
-        assert (
-            params["fieldSelector"]
-            == "status.phase!=Succeeded,status.phase!=Failed,spec.nodeName!="
-        )
+        assert params["fieldSelector"] == "status.phase!=Succeeded,status.phase!=Failed"
         return [pod(**{GPU: "2"})]
 
     monkeypatch.setattr(access.Kubernetes, "collection", collection)
